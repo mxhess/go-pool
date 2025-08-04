@@ -42,6 +42,10 @@ func IsAddressValid(addr string) bool {
 
 	prefix := data[:len(data)-(64)]
 
+	logger.Debug("Decoded address prefix:", prefix)
+	logger.Debug("Expected addr_prefix:", config.Cfg.AddrPrefix) 
+	logger.Debug("Expected subaddr_prefix:", config.Cfg.SubaddrPrefix)
+
 	if bytes.Equal(data[:len(config.Cfg.AddrPrefix)], config.Cfg.AddrPrefix) {
 		return len(data) == len(config.Cfg.AddrPrefix)+64
 	} else if bytes.Equal(data[:len(config.Cfg.SubaddrPrefix)], config.Cfg.SubaddrPrefix) {

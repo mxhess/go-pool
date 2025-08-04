@@ -21,11 +21,13 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"go-pool/config"
 	"go-pool/logger"
 	"go-pool/serializer"
 	"io"
 	"net"
+	"os"
 	"sync"
 	"time"
 
@@ -36,6 +38,146 @@ var conn net.Conn
 var connMut sync.RWMutex
 
 const Overhead = 40
+
+// NEW: Cached share structure
+type CachedShare struct {
+	Wallet   string    `json:"wallet"`
+	WorkerID string    `json:"worker_id"`
+	Diff     uint64    `json:"diff"`
+	Time     time.Time `json:"time"`
+	ID       string    `json:"id"` // Unique ID for tracking
+}
+
+// NEW: Cache management
+var shareCache []CachedShare
+var cacheMutex sync.RWMutex
+const CACHE_FILE = "cached_shares.json"
+
+// NEW: Initialize cache from file on startup
+func init() {
+	loadShareCache()
+}
+
+// NEW: Load cached shares from disk
+func loadShareCache() {
+	cacheMutex.Lock()
+	defer cacheMutex.Unlock()
+	
+	data, err := os.ReadFile(CACHE_FILE)
+	if err != nil {
+		logger.Info("No cached shares file found (this is normal on first run)")
+		shareCache = make([]CachedShare, 0)
+		return
+	}
+	
+	err = json.Unmarshal(data, &shareCache)
+	if err != nil {
+		logger.Error("Failed to load cached shares:", err)
+		shareCache = make([]CachedShare, 0)
+		return
+	}
+	
+	logger.Info("Loaded", len(shareCache), "cached shares from disk")
+}
+
+// NEW: Save cached shares to disk
+func saveShareCache() {
+	cacheMutex.RLock()
+	defer cacheMutex.RUnlock()
+	
+	data, err := json.Marshal(shareCache)
+	if err != nil {
+		logger.Error("Failed to marshal cached shares:", err)
+		return
+	}
+	
+	err = os.WriteFile(CACHE_FILE, data, 0600)
+	if err != nil {
+		logger.Error("Failed to save cached shares:", err)
+		return
+	}
+	
+	logger.Debug("Saved", len(shareCache), "shares to cache file")
+}
+
+// NEW: Add share to cache
+func cacheShare(wallet, workerID string, diff uint64) {
+	cacheMutex.Lock()
+	defer cacheMutex.Unlock()
+	
+	// Generate unique ID for this share
+	shareID := hex.EncodeToString([]byte(time.Now().Format("20060102150405.000000")))
+	
+	cached := CachedShare{
+		Wallet:   wallet,
+		WorkerID: workerID,
+		Diff:     diff,
+		Time:     time.Now(),
+		ID:       shareID,
+	}
+	
+	shareCache = append(shareCache, cached)
+	
+	logger.Info("Cached share:", wallet, "worker:", workerID, "diff:", diff, "cache_size:", len(shareCache))
+	
+	// Save to disk immediately
+	go saveShareCache()
+}
+
+// NEW: Send cached shares when reconnected
+func sendCachedShares() {
+	cacheMutex.Lock()
+	defer cacheMutex.Unlock()
+	
+	if len(shareCache) == 0 {
+		return
+	}
+	
+	logger.Info("Sending", len(shareCache), "cached shares to master")
+	
+	// Send all cached shares
+	for _, cached := range shareCache {
+		s := serializer.Serializer{}
+		s.AddUint8(0) // Share Found packet type
+		s.AddUvarint(1) // number of shares
+		s.AddString(cached.Wallet)
+		s.AddString(cached.WorkerID)
+		s.AddUvarint(cached.Diff)
+		
+		sendToConnDirect(s.Data)
+		logger.Debug("Sent cached share:", cached.Wallet, "worker:", cached.WorkerID, "diff:", cached.Diff)
+	}
+	
+	// Clear cache after sending
+	shareCache = make([]CachedShare, 0)
+	logger.Info("All cached shares sent and cleared")
+	
+	// Remove cache file
+	os.Remove(CACHE_FILE)
+}
+
+// Enhanced share sending with caching
+func SendShareWithWorker(wallet, workerID string, diff uint64) {
+	connMut.RLock()
+	connected := (conn != nil)
+	connMut.RUnlock()
+	
+	if !connected {
+		logger.Warn("Master disconnected, caching share:", wallet, "worker:", workerID)
+		cacheShare(wallet, workerID, diff)
+		return
+	}
+	
+	s := serializer.Serializer{}
+	s.AddUint8(0) // Share Found packet type
+	s.AddUvarint(1) // number of shares
+	s.AddString(wallet)
+	s.AddString(workerID)
+	s.AddUvarint(diff)
+	
+	sendToConn(s.Data)
+	logger.Debug("Sent share to master:", wallet, "worker:", workerID, "diff:", diff)
+}
 
 func StartSlaveClient() {
 out:
@@ -50,48 +192,63 @@ out:
 			time.Sleep(time.Second)
 			continue out
 		}
+		
+		logger.Info("Connected to master server")
+		
+		// NEW: Send any cached shares immediately upon reconnection
+		go func() {
+			time.Sleep(1 * time.Second) // Give connection a moment to stabilize
+			sendCachedShares()
+		}()
 
 		for {
 			lenBuf := make([]byte, 2+Overhead)
 			_, err := io.ReadFull(conn, lenBuf)
 			if err != nil {
-				logger.Warn(err)
-				conn.Close()
+				logger.Warn("Connection to master lost:", err)
+				connMut.Lock()
+				conn = nil
+				connMut.Unlock()
 				time.Sleep(time.Second)
 				continue out
 			}
 			lenBuf, err = Decrypt(lenBuf)
 			if err != nil {
 				logger.Warn(err)
-				conn.Close()
+				connMut.Lock()
+				conn = nil
+				connMut.Unlock()
 				time.Sleep(time.Second)
 				continue out
 			}
 			len := int(lenBuf[0]) | (int(lenBuf[1]) << 8)
 
 			// read the actual message
-
 			buf := make([]byte, len+Overhead)
 			_, err = io.ReadFull(conn, buf)
 			if err != nil {
 				logger.Warn(err)
-				conn.Close()
+				connMut.Lock()
+				conn = nil
+				connMut.Unlock()
 				time.Sleep(time.Second)
 				continue out
 			}
 			buf, err = Decrypt(buf)
 			if err != nil {
 				logger.Warn(err)
-				conn.Close()
+				connMut.Lock()
+				conn = nil
+				connMut.Unlock()
 				time.Sleep(time.Second)
 				continue out
 			}
 			logger.Net("Received message:", hex.EncodeToString(buf))
 			OnMessage(buf)
 		}
-
 	}
 }
+
 func OnMessage(b []byte) {
 	d := serializer.Deserializer{
 		Data: b,
@@ -100,31 +257,13 @@ func OnMessage(b []byte) {
 	packet := d.ReadUint8()
 
 	switch packet {
-
+	// No incoming messages from master currently
 	}
 }
 
+// Legacy function for backward compatibility
 func SendShare(wallet string, diff uint64) {
-	connMut.Lock()
-	defer connMut.Unlock()
-
-	cacheShare(wallet, diff)
-
-	/*if conn == nil {
-		cacheShare(wallet, diff)
-
-		return
-	}
-
-	s := serializer.Serializer{
-		Data: []byte{0},
-	}
-
-	s.AddUvarint(1)
-	s.AddString(wallet)
-	s.AddUvarint(diff)
-
-	sendToConn(s.Data)*/
+	SendShareWithWorker(wallet, "legacy", diff)
 }
 
 func SendBlockFound(height, reward uint64, hash []byte) {
@@ -138,6 +277,7 @@ func SendBlockFound(height, reward uint64, hash []byte) {
 
 	sendToConn(s.Data)
 }
+
 func SendStats(nrMiners int) {
 	s := serializer.Serializer{
 		Data: []byte{2},
@@ -146,6 +286,7 @@ func SendStats(nrMiners int) {
 
 	sendToConn(s.Data)
 }
+
 func SendShareFound(height uint64) {
 	s := serializer.Serializer{
 		Data: []byte{3},
@@ -155,11 +296,24 @@ func SendShareFound(height uint64) {
 
 	sendToConn(s.Data)
 }
+
+// NEW: Direct send without checking connection (for cached shares)
+func sendToConnDirect(data []byte) {
+	var dataLenBin = make([]byte, 0, 2)
+	dataLenBin = binary.LittleEndian.AppendUint16(dataLenBin, uint16(len(data)))
+	conn.Write(Encrypt(dataLenBin))
+	conn.Write(Encrypt(data))
+}
+
 func sendToConn(data []byte) {
+	connMut.RLock()
+	defer connMut.RUnlock()
+	
 	if conn == nil {
 		logger.Error("SendToConn: Connection is nil")
 		return
 	}
+	
 	var dataLenBin = make([]byte, 0, 2)
 	dataLenBin = binary.LittleEndian.AppendUint16(dataLenBin, uint16(len(data)))
 	conn.Write(Encrypt(dataLenBin))
@@ -200,3 +354,4 @@ func Decrypt(msg []byte) ([]byte, error) {
 
 	return decrypted, nil
 }
+

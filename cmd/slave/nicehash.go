@@ -25,7 +25,7 @@ import (
 	"go-pool/util"
 	"sync"
 
-	"github.com/duggavo/go-monero/rpc/daemon"
+	"github.com/mxhess/go-salvium/rpc/daemon"
 )
 
 type NicehashJob struct {

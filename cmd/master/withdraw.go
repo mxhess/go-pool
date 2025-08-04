@@ -27,9 +27,9 @@ import (
 	"math"
 	"time"
 
-	"github.com/duggavo/go-monero/rpc"
-	"github.com/duggavo/go-monero/rpc/daemon"
-	"github.com/duggavo/go-monero/rpc/wallet"
+	"github.com/mxhess/go-salvium/rpc"
+	"github.com/mxhess/go-salvium/rpc/daemon"
+	"github.com/mxhess/go-salvium/rpc/wallet"
 	bolt "go.etcd.io/bbolt"
 )
 

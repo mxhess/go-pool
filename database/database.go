@@ -21,6 +21,7 @@ import "go-pool/serializer"
 
 type Share struct {
 	Wallet string `json:"wall"`
+	WorkerID string `json:"worker_id"`
 	Diff   uint64 `json:"diff"`
 	Time   uint64 `json:"time"`
 }
@@ -33,6 +34,7 @@ func (x *Share) Serialize() []byte {
 	s.AddUint8(VERSION)
 
 	s.AddString(x.Wallet)
+	s.AddString(x.WorkerID)
 	s.AddUint64(x.Diff)
 	s.AddUint64(x.Time)
 
@@ -46,8 +48,44 @@ func (x *Share) Deserialize(data []byte) error {
 	d.ReadUint8()
 
 	x.Wallet = d.ReadString()
+	x.WorkerID = d.ReadString()
 	x.Diff = d.ReadUint64()
 	x.Time = d.ReadUint64()
+
+	return d.Error
+}
+
+// NEW: Worker information structure
+type WorkerInfo struct {
+	Address    string  `json:"address"`
+	WorkerID   string  `json:"worker_id"`
+	LastActive uint64  `json:"last_active"`
+	Hashrate5m float64 `json:"hashrate_5m"`
+}
+
+func (x *WorkerInfo) Serialize() []byte {
+	s := serializer.Serializer{}
+
+	s.AddUint8(VERSION)
+
+	s.AddString(x.Address)
+	s.AddString(x.WorkerID)
+	s.AddUvarint(x.LastActive)
+	// Note: Hashrate is calculated, not stored
+
+	return s.Data
+}
+
+func (x *WorkerInfo) Deserialize(data []byte) error {
+	d := serializer.Deserializer{
+		Data: data,
+	}
+
+	d.ReadUint8()
+
+	x.Address = d.ReadString()
+	x.WorkerID = d.ReadString()
+	x.LastActive = d.ReadUvarint()
 
 	return d.Error
 }
@@ -186,4 +224,5 @@ var (
 	ADDRESS_INFO = []byte("a") // address -> address data
 	SHARES       = []byte("s") // share id -> share data
 	PENDING      = []byte("p") // "pending" -> pending balances
+	WORKERS      = []byte("w") // NEW: worker_key -> worker data
 )

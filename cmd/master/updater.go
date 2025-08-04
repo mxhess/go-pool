@@ -30,7 +30,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/duggavo/go-monero/rpc/wallet"
+	"github.com/mxhess/go-salvium/rpc/wallet"
 	bolt "go.etcd.io/bbolt"
 )
 

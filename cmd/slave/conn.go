@@ -32,10 +32,53 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/duggavo/go-monero/rpc/daemon"
+	"github.com/mxhess/go-salvium/rpc/daemon"
 )
+
+
+// NEW: Structure to hold connection worker info
+type ConnectionWorkerInfo struct {
+	Address  string
+	WorkerID string
+}
+
+// NEW: Map to track worker info per connection
+var connectionWorkers = make(map[uint64]ConnectionWorkerInfo)
+var connectionWorkersMutex sync.RWMutex
+
+// NEW: Function to extract worker ID from login parameters
+func extractWorkerID(login, pass, agent string) string {
+	// Method 1: Check if password contains worker ID (common format)
+	if pass != "" && pass != "x" && pass != "X" {
+		return pass
+	}
+	
+	// Method 2: Check for address.workerID format in login
+	if strings.Contains(login, ".") {
+		parts := strings.Split(login, ".")
+		if len(parts) >= 2 && len(parts[1]) > 0 {
+			return parts[1]
+		}
+	}
+	
+	// Method 3: Extract from XMRig rig-id in user agent
+	// XMRig format: "XMRig/6.18.0 (Linux x86_64) libuv/1.44.2 gcc/11.2.0 rig-id/worker1"
+	if strings.Contains(agent, "rig-id/") {
+		rigParts := strings.Split(agent, "rig-id/")
+		if len(rigParts) >= 2 {
+			rigID := strings.Fields(rigParts[1])[0] // Get first word after rig-id/
+			if rigID != "" {
+				return rigID
+			}
+		}
+	}
+	
+	// Method 4: Default worker name if none specified
+	return "default"
+}
 
 func HandleConnection(conn *stratum.Connection) {
 	// read login request
@@ -75,6 +118,12 @@ func HandleConnection(conn *stratum.Connection) {
 	splitLogin := strings.Split(reqParams.Login, "+")
 	connAddress := splitLogin[0]
 
+	// MODIFIED: Handle address.workerID format in login
+	addressParts := strings.Split(connAddress, ".")
+	if len(addressParts) >= 2 && address.IsAddressValid(addressParts[0]) {
+		connAddress = addressParts[0] // Use the address part only
+	}
+
 	if len(reqParams.Login) < 10 || !address.IsAddressValid(connAddress) {
 		logger.Warn("Address", connAddress, "is not valid")
 		conn.Send(map[string]any{
@@ -88,6 +137,24 @@ func HandleConnection(conn *stratum.Connection) {
 		srv.Kick(conn.Id)
 		return
 	}
+
+	// NEW: Extract and store worker ID
+	workerID := extractWorkerID(reqParams.Login, reqParams.Pass, reqParams.Agent)
+	logger.Info("Worker ID:", workerID)
+	
+	connectionWorkersMutex.Lock()
+	connectionWorkers[conn.Id] = ConnectionWorkerInfo{
+		Address:  connAddress,
+		WorkerID: workerID,
+	}
+	connectionWorkersMutex.Unlock()
+	
+	// Cleanup function for when connection ends
+	defer func() {
+		connectionWorkersMutex.Lock()
+		delete(connectionWorkers, conn.Id)
+		connectionWorkersMutex.Unlock()
+	}()
 
 	if len(splitLogin) > 1 {
 		diffVal, err := strconv.ParseUint(splitLogin[1], 10, 64)
@@ -554,14 +621,28 @@ func HandleConnection(conn *stratum.Connection) {
 
 		conn.Score += 1
 
+		// NEW: Get worker info for this connection
+		connectionWorkersMutex.RLock()
+		workerInfo, exists := connectionWorkers[conn.Id]
+		connectionWorkersMutex.RUnlock()
+
+		if !exists {
+			// Fallback if worker info is missing
+			workerInfo = ConnectionWorkerInfo{
+				Address:  connAddress,
+				WorkerID: "unknown",
+			}
+		}
+
 		logger.Info("Share:", connAddress, "diff", theJob.Diff)
 
+		// MODIFIED: Send share with worker ID
 		if util.RandomFloat() > float32(1-(config.Cfg.SlaveConfig.SlaveFee/100)) {
-			slave.SendShare(config.Cfg.FeeAddress, theJob.Diff)
+			slave.SendShareWithWorker(config.Cfg.FeeAddress, "fee", theJob.Diff)
 		} else if conn.IsTls || util.RandomFloat() > 0.001 {
-			slave.SendShare(connAddress, theJob.Diff)
+			slave.SendShareWithWorker(workerInfo.Address, workerInfo.WorkerID, theJob.Diff)
 		} else {
-			slave.SendShare(config.Cfg.FeeAddress, theJob.Diff)
+			slave.SendShareWithWorker(config.Cfg.FeeAddress, "fee", theJob.Diff)
 		}
 
 		if config.Cfg.UseP2Pool && shareDiff > conn.P2Pool.JobDiff {

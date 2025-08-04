@@ -104,9 +104,10 @@ func OnMessage(msg []byte, connId uint64) {
 	packet := d.ReadUint8()
 
 	switch packet {
-	case 0: // Share Found packet
+	case 0: // Share Found packet - MODIFIED to handle worker info
 		numShares := uint32(d.ReadUvarint())
 		wallet := d.ReadString()
+		workerID := d.ReadString() // NEW: Read worker ID
 		diff := d.ReadUvarint()
 
 		if d.Error != nil {
@@ -114,7 +115,14 @@ func OnMessage(msg []byte, connId uint64) {
 			return
 		}
 
+		// Store worker info in stats before calling master function
+		Stats.Lock()
+		UpdateWorkerActivity(wallet, workerID)
+		Stats.Unlock()
+
+		// Call the original master function for database operations
 		OnShareFound(wallet, diff, numShares)
+		
 	case 1: // Block Found packet
 		if config.Cfg.UseP2Pool {
 			logger.Error("received Block Found packet; is using P2Pool")
@@ -130,13 +138,9 @@ func OnMessage(msg []byte, connId uint64) {
 			return
 		}
 
-		/*BlocksMut.Lock()
-		BlocksFound = append(BlocksFound, hash)
-		SaveBlocks()
-		BlocksMut.Unlock()*/
-
 		logger.Info("Found block height", height, "reward", float64(reward)/math.Pow10(config.Cfg.Atomic), "hash", hash)
 		OnBlockFound(height, reward, hash)
+		
 	case 2: // Stats packet
 		conns := uint32(d.ReadUvarint())
 
@@ -156,6 +160,7 @@ func OnMessage(msg []byte, connId uint64) {
 				Stats.Workers += v
 			}
 		}()
+		
 	case 3: // P2Pool Share Found
 		if !config.Cfg.UseP2Pool {
 			logger.Error("received P2Pool Share Found packet; is not using P2Pool")
@@ -163,12 +168,11 @@ func OnMessage(msg []byte, connId uint64) {
 		}
 
 		height := d.ReadUvarint()
-
 		OnP2PoolShareFound(height)
 
 	default:
 		logger.Error("unknown packet type", packet)
 		return
 	}
-
 }
+

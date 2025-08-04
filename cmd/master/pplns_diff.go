@@ -27,15 +27,15 @@ func GetPplnsWindow() uint64 {
 	blockFoundInterval := Stats.NetHashrate / Stats.PoolHashrate * float64(config.BlockTime)
 
 	if blockFoundInterval == 0 {
-		return 2 * 3600 * 24
+		return 6 * 3600
 	}
 
 	// PPLNS window is double of average pool block found time
 	blockFoundInterval *= 2
 
-	// PPLNS window is at most 2 days
-	if blockFoundInterval > 2*3600*24 {
-		return 2 * 3600 * 24
+	// PPLNS window is at most 6 hours
+	if blockFoundInterval > 6*3600 {
+		return 6 * 3600
 	}
 
 	// PPLNS window is at most 2 times the block time

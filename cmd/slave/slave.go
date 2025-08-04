@@ -29,8 +29,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/duggavo/go-monero/rpc"
-	"github.com/duggavo/go-monero/rpc/daemon"
+	"github.com/mxhess/go-salvium/rpc"
+	"github.com/mxhess/go-salvium/rpc/daemon"
 )
 
 type Infos struct {

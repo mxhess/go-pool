@@ -18,236 +18,328 @@
 package main
 
 import (
-	"encoding/json"
-	"go-pool/logger"
-	"go-pool/util"
-	"math"
-	"os"
-	"sync"
-	"time"
+        "encoding/json"
+        "go-pool/logger"
+        "go-pool/util"
+        "math"
+        "os"
+        "sync"
+        "time"
 
-	"github.com/duggavo/go-monero/rpc/wallet"
+        "github.com/mxhess/go-salvium/rpc/wallet"
 )
 
 const STATS_INTERVAL = 15 // Minutes
 const NUM_CHART_DATA = (60 * 24 / STATS_INTERVAL)
 
 type LastBlock struct {
-	Height    uint64 `json:"height"`
-	Timestamp int64  `json:"timestamp"`
-	Reward    uint64 `json:"reward"`
-	Hash      string `json:"hash"`
+        Height    uint64 `json:"height"`
+        Timestamp int64  `json:"timestamp"`
+        Reward    uint64 `json:"reward"`
+        Hash      string `json:"hash"`
 }
 
 type StatsShare struct {
-	Count  uint32 `json:"count"`
-	Wallet string `json:"wall"`
-	Diff   uint64 `json:"diff"`
-	Time   uint64 `json:"time"`
+        Count    uint32 `json:"count"`
+        Wallet   string `json:"wall"`
+        WorkerID string `json:"worker_id"` // NEW: Worker ID
+        Diff     uint64 `json:"diff"`
+        Time     uint64 `json:"time"`
+}
+
+// NEW: Worker statistics structure
+type WorkerStats struct {
+        WorkerID   string  `json:"worker_id"`
+        Address    string  `json:"address"`
+        Hashrate   float64 `json:"hashrate"`
+        LastActive uint64  `json:"last_active"`
+        Shares     uint32  `json:"shares"`
 }
 
 type Statistics struct {
-	LastUpdate int64
+        LastUpdate int64
 
-	PoolHashrate      float64
-	PoolHashrateChart []Hr
-	HashrateCharts    map[string][]Hr
+        PoolHashrate      float64
+        PoolHashrateChart []Hr
+        HashrateCharts    map[string][]Hr
 
-	Shares []StatsShare
+        Shares []StatsShare
 
-	LastBlock LastBlock
+        LastBlock LastBlock
 
-	BlocksFound []FoundInfo
-	NumFound    int32
+        BlocksFound []FoundInfo
+        NumFound    int32
 
-	NetHashrate float64
+        NetHashrate float64
 
-	KnownAddresses map[string]uint64
+        KnownAddresses map[string]uint64
+        KnownWorkers   map[string]map[string]uint64 // NEW: address -> worker_id -> last_active
 
-	RecentWithdrawals []Withdrawal
+        RecentWithdrawals []Withdrawal
 
-	Workers        uint32 // the current number of miners
-	WorkersChart   []uint32
-	AddressesChart []uint32
+        Workers        uint32 // the current number of miners
+        WorkersChart   []uint32
+        AddressesChart []uint32
 
-	sync.RWMutex
+        sync.RWMutex
 }
 
 type Withdrawal struct {
-	Txid         string `json:"txid"`
-	Timestamp    uint64 `json:"time"`
-	Destinations []wallet.Destination
+        Txid         string `json:"txid"`
+        Timestamp    uint64 `json:"time"`
+        Destinations []wallet.Destination
 }
 
 type Hr struct {
-	Time     int64   `json:"t"`
-	Hashrate float64 `json:"h"`
+        Time     int64   `json:"t"`
+        Hashrate float64 `json:"h"`
 }
 
 type FoundInfo struct {
-	Height uint64 `json:"height"`
-	Hash   string `json:"hash"`
+        Height uint64 `json:"height"`
+        Hash   string `json:"hash"`
 }
 
 var Stats = Statistics{
-	HashrateCharts: make(map[string][]Hr),
-	KnownAddresses: make(map[string]uint64, NUM_CHART_DATA),
+        HashrateCharts: make(map[string][]Hr),
+        KnownAddresses: make(map[string]uint64, NUM_CHART_DATA),
+        KnownWorkers:   make(map[string]map[string]uint64), // NEW: Initialize worker tracking
 }
 
 func StatsServer() {
-	statsData, err := os.ReadFile("stats.json")
-	if err != nil {
-		logger.Warn(err)
-	} else {
-		Stats.Lock()
+        statsData, err := os.ReadFile("stats.json")
+        if err != nil {
+                logger.Warn(err)
+        } else {
+                Stats.Lock()
 
-		err := json.Unmarshal(statsData, &Stats)
-		if err != nil {
-			logger.Warn(err)
-		}
+                err := json.Unmarshal(statsData, &Stats)
+                if err != nil {
+                        logger.Warn(err)
+                }
 
-		Stats.Unlock()
-	}
+                // Initialize KnownWorkers if nil (for backwards compatibility)
+                if Stats.KnownWorkers == nil {
+                        Stats.KnownWorkers = make(map[string]map[string]uint64)
+                }
 
-	for {
-		time.Sleep(100 * time.Millisecond)
+                Stats.Unlock()
+        }
 
-		func() {
-			Stats.Lock()
-			defer Stats.Unlock()
+        for {
+                time.Sleep(100 * time.Millisecond)
 
-			if time.Now().Unix()-Stats.LastUpdate < STATS_INTERVAL*60 {
-				return
-			} else if time.Now().Unix()-Stats.LastUpdate > (STATS_INTERVAL*60)*10 {
-				Stats.LastUpdate = time.Now().Unix() - STATS_INTERVAL*60
-				return
-			}
+                func() {
+                        Stats.Lock()
+                        defer Stats.Unlock()
 
-			logger.Info("Updating stats")
+                        if time.Now().Unix()-Stats.LastUpdate < STATS_INTERVAL*60 {
+                                return
+                        } else if time.Now().Unix()-Stats.LastUpdate > (STATS_INTERVAL*60)*10 {
+                                Stats.LastUpdate = time.Now().Unix() - STATS_INTERVAL*60
+                                return
+                        }
 
-			Stats.Cleanup()
+                        logger.Info("Updating stats")
 
-			Stats.LastUpdate += STATS_INTERVAL * 60
+                        Stats.Cleanup()
 
-			var totHr float64 = 0
+                        Stats.LastUpdate += STATS_INTERVAL * 60
 
-			if Stats.HashrateCharts == nil {
-				Stats.HashrateCharts = make(map[string][]Hr, 20)
-			}
+                        var totHr float64 = 0
 
-			for i := range Stats.KnownAddresses {
-				hr := Get15mHashrate(i)
-				totHr += hr
+                        if Stats.HashrateCharts == nil {
+                                Stats.HashrateCharts = make(map[string][]Hr, 20)
+                        }
 
-				Stats.HashrateCharts[i] = append(Stats.HashrateCharts[i], Hr{
-					Time:     Stats.LastUpdate,
-					Hashrate: hr,
-				})
+                        for i := range Stats.KnownAddresses {
+                                hr := Get15mHashrate(i)
+                                totHr += hr
 
-				for len(Stats.HashrateCharts[i]) > NUM_CHART_DATA {
-					Stats.HashrateCharts[i] = Stats.HashrateCharts[i][1:]
-				}
+                                Stats.HashrateCharts[i] = append(Stats.HashrateCharts[i], Hr{
+                                        Time:     Stats.LastUpdate,
+                                        Hashrate: hr,
+                                })
 
-				didFind := false
-				for _, v := range Stats.HashrateCharts[i] {
-					if v.Hashrate != 0 {
-						didFind = true
-					}
-				}
-				if !didFind {
-					delete(Stats.KnownAddresses, i)
-					delete(Stats.HashrateCharts, i)
-				}
-			}
+                                for len(Stats.HashrateCharts[i]) > NUM_CHART_DATA {
+                                        Stats.HashrateCharts[i] = Stats.HashrateCharts[i][1:]
+                                }
 
-			Stats.WorkersChart = append(Stats.WorkersChart, Stats.Workers)
-			Stats.AddressesChart = append(Stats.AddressesChart, uint32(len(Stats.KnownAddresses)))
-			Stats.PoolHashrateChart = append(Stats.PoolHashrateChart, Hr{
-				Time:     Stats.LastUpdate,
-				Hashrate: Round0(totHr),
-			})
-			for len(Stats.PoolHashrateChart) > NUM_CHART_DATA {
-				Stats.PoolHashrateChart = Stats.PoolHashrateChart[1:]
-			}
-			for len(Stats.WorkersChart) > NUM_CHART_DATA {
-				Stats.WorkersChart = Stats.WorkersChart[1:]
-			}
-			for len(Stats.AddressesChart) > NUM_CHART_DATA {
-				Stats.AddressesChart = Stats.AddressesChart[1:]
-			}
-		}()
-	}
+                                didFind := false
+                                for _, v := range Stats.HashrateCharts[i] {
+                                        if v.Hashrate != 0 {
+                                                didFind = true
+                                        }
+                                }
+                                if !didFind {
+                                        delete(Stats.KnownAddresses, i)
+                                        delete(Stats.HashrateCharts, i)
+                                        delete(Stats.KnownWorkers, i) // NEW: Clean up worker data
+                                }
+                        }
+
+                        Stats.WorkersChart = append(Stats.WorkersChart, Stats.Workers)
+                        Stats.AddressesChart = append(Stats.AddressesChart, uint32(len(Stats.KnownAddresses)))
+                        Stats.PoolHashrateChart = append(Stats.PoolHashrateChart, Hr{
+                                Time:     Stats.LastUpdate,
+                                Hashrate: Round0(totHr),
+                        })
+                        for len(Stats.PoolHashrateChart) > NUM_CHART_DATA {
+                                Stats.PoolHashrateChart = Stats.PoolHashrateChart[1:]
+                        }
+                        for len(Stats.WorkersChart) > NUM_CHART_DATA {
+                                Stats.WorkersChart = Stats.WorkersChart[1:]
+                        }
+                        for len(Stats.AddressesChart) > NUM_CHART_DATA {
+                                Stats.AddressesChart = Stats.AddressesChart[1:]
+                        }
+                }()
+        }
 }
 
 // Stats MUST be at least RLocked
 func Get5mHashrate(wallet string) float64 {
-	var numHashes float64
-	for _, v := range Stats.Shares {
-		deltaT := util.Time() - v.Time
-		if v.Wallet == wallet && deltaT <= 5*60 {
-			numHashes += float64(v.Diff)
-		}
-	}
-	return math.Round(numHashes / (5 * 60))
+        var numHashes float64
+        for _, v := range Stats.Shares {
+                deltaT := util.Time() - v.Time
+                if v.Wallet == wallet && deltaT <= 5*60 {
+                        numHashes += float64(v.Diff)
+                }
+        }
+        return math.Round(numHashes / (5 * 60))
 }
 
 // Stats MUST be at least RLocked
 func Get15mHashrate(wallet string) float64 {
-	var numHashes float64
-	for _, v := range Stats.Shares {
-		deltaT := util.Time() - v.Time
-		if v.Wallet == wallet && deltaT <= 15*60 {
-			numHashes += float64(v.Diff)
-		}
-	}
-	return math.Round(numHashes / (15 * 60))
+        var numHashes float64
+        for _, v := range Stats.Shares {
+                deltaT := util.Time() - v.Time
+                if v.Wallet == wallet && deltaT <= 15*60 {
+                        numHashes += float64(v.Diff)
+                }
+        }
+        return math.Round(numHashes / (15 * 60))
+}
+
+// NEW: Get hashrate for a specific worker
+func GetWorkerHashrate(wallet string, workerID string) float64 {
+        var numHashes float64
+        for _, v := range Stats.Shares {
+                deltaT := util.Time() - v.Time
+                if v.Wallet == wallet && v.WorkerID == workerID && deltaT <= 5*60 {
+                        numHashes += float64(v.Diff)
+                }
+        }
+        return math.Round(numHashes / (5 * 60))
+}
+
+// NEW: Get all workers for an address
+func GetAddressWorkers(wallet string) []WorkerStats {
+        workers := make([]WorkerStats, 0)
+
+        if addressWorkers, exists := Stats.KnownWorkers[wallet]; exists {
+                for workerID, lastActive := range addressWorkers {
+                        // Only include workers active in last hour
+                        if util.Time()-lastActive <= 3600 {
+                                hashrate := GetWorkerHashrate(wallet, workerID)
+
+                                // Count shares in last 5 minutes
+                                var shares uint32
+                                for _, v := range Stats.Shares {
+                                        deltaT := util.Time() - v.Time
+                                        if v.Wallet == wallet && v.WorkerID == workerID && deltaT <= 5*60 {
+                                                shares++
+                                        }
+                                }
+
+                                workers = append(workers, WorkerStats{
+                                        WorkerID:   workerID,
+                                        Address:    wallet,
+                                        Hashrate:   hashrate,
+                                        LastActive: lastActive,
+                                        Shares:     shares,
+                                })
+                        }
+                }
+        }
+
+        return workers
+}
+
+// NEW: Update worker activity
+func UpdateWorkerActivity(wallet string, workerID string) {
+        if Stats.KnownWorkers[wallet] == nil {
+                Stats.KnownWorkers[wallet] = make(map[string]uint64)
+        }
+        Stats.KnownWorkers[wallet][workerID] = util.Time()
 }
 
 // Removes shares older than 15 minutes. Also updates the Pool Hashrate in stats, and saves the stats.
 // Stats must be locked.
 func (s *Statistics) Cleanup() {
-	shares2 := make([]StatsShare, 0, len(s.Shares))
-	var totalHashes float64 = 0
+        shares2 := make([]StatsShare, 0, len(s.Shares))
+        var totalHashes float64 = 0
 
-	for _, v := range s.Shares {
-		// share isn't outdated
-		if v.Time+(15*60) >= util.Time() {
-			shares2 = append(shares2, v)
-			totalHashes += float64(v.Diff)
-		}
+        for _, v := range s.Shares {
+                // share isn't outdated
+                if v.Time+(15*60) >= util.Time() {
+                        shares2 = append(shares2, v)
+                        totalHashes += float64(v.Diff)
+                }
 
-		s.KnownAddresses[v.Wallet] = v.Time
-	}
+                s.KnownAddresses[v.Wallet] = v.Time
 
-	kaddr := make(map[string]uint64, len(s.KnownAddresses))
+                // NEW: Update worker activity
+                if v.WorkerID != "" {
+                        UpdateWorkerActivity(v.Wallet, v.WorkerID)
+                }
+        }
 
-	// clean up known addresses
-	for i, v := range s.KnownAddresses {
-		if v+3600*24 > util.Time() { // address is not out of date
-			kaddr[i] = v
-		}
-	}
+        kaddr := make(map[string]uint64, len(s.KnownAddresses))
 
-	s.KnownAddresses = kaddr
+        // clean up known addresses
+        for i, v := range s.KnownAddresses {
+                if v+3600*24 > util.Time() { // address is not out of date
+                        kaddr[i] = v
+                }
+        }
 
-	s.Shares = shares2
-	s.PoolHashrate = math.Round(totalHashes / (15 * 60))
+        s.KnownAddresses = kaddr
 
-	data, err := json.Marshal(s)
-	if err != nil {
-		logger.Error(err)
-		return
-	}
+        // NEW: Clean up inactive workers
+        for address, workers := range s.KnownWorkers {
+                cleanWorkers := make(map[string]uint64)
+                for workerID, lastActive := range workers {
+                        if lastActive+3600*24 > util.Time() { // worker is not out of date
+                                cleanWorkers[workerID] = lastActive
+                        }
+                }
+                if len(cleanWorkers) > 0 {
+                        s.KnownWorkers[address] = cleanWorkers
+                } else {
+                        delete(s.KnownWorkers, address)
+                }
+        }
 
-	// only keep the last 40 blocks found
-	for len(s.BlocksFound) > 40 {
-		s.BlocksFound = s.BlocksFound[:len(s.BlocksFound)-2]
-	}
+        s.Shares = shares2
+        s.PoolHashrate = math.Round(totalHashes / (15 * 60))
 
-	// only keep the last 40 withdrawal transactions
-	for len(s.RecentWithdrawals) > 40 {
-		s.RecentWithdrawals = s.RecentWithdrawals[:len(s.RecentWithdrawals)-2]
-	}
+        data, err := json.Marshal(s)
+        if err != nil {
+                logger.Error(err)
+                return
+        }
 
-	os.WriteFile("stats.json", data, 0o600)
+        // only keep the last 40 blocks found
+        for len(s.BlocksFound) > 40 {
+                s.BlocksFound = s.BlocksFound[:len(s.BlocksFound)-2]
+        }
+
+        // only keep the last 40 withdrawal transactions
+        for len(s.RecentWithdrawals) > 40 {
+                s.RecentWithdrawals = s.RecentWithdrawals[:len(s.RecentWithdrawals)-2]
+        }
+
+        os.WriteFile("stats.json", data, 0o600)
 }
+

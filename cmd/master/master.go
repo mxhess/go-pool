@@ -27,8 +27,8 @@ import (
 	"net"
 	"sync"
 
-	"github.com/duggavo/go-monero/rpc"
-	"github.com/duggavo/go-monero/rpc/daemon"
+	"github.com/mxhess/go-salvium/rpc"
+	"github.com/mxhess/go-salvium/rpc/daemon"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -147,35 +147,43 @@ func DatabaseCleanup() {
 
 func OnShareFound(wallet string, diff uint64, numShares uint32) {
 	logger.Info("Wallet", wallet, "found", numShares, "shares with diff", float64(diff/100)/10, "k HR:", Get5mHashrate(wallet))
-
 	if !address.IsAddressValid(wallet) {
 		logger.Warn("Wallet", wallet, "is not valid. Replacing it with fee address.")
 		wallet = config.Cfg.FeeAddress
 	}
-
+	
 	Stats.Lock()
-	Stats.Shares = append(Stats.Shares, StatsShare{
-		Count:  numShares,
-		Wallet: wallet,
-		Diff:   diff,
-		Time:   util.Time(),
-	})
+	
+	// NEW: Try to get the worker ID that was stored by the handler
+	// We'll use "legacy" as default since the original protocol doesn't have worker IDs
+	workerID := "legacy"
+	
+	// Add shares with worker information
+	for i := uint32(0); i < numShares; i++ {
+		Stats.Shares = append(Stats.Shares, StatsShare{
+			Count:    1,
+			Wallet:   wallet,
+			WorkerID: workerID, // NEW: Include worker ID
+			Diff:     diff,
+			Time:     util.Time(),
+		})
+	}
+	
 	Stats.Cleanup()
 	Stats.Unlock()
-
+	
 	DB.Update(func(tx *bolt.Tx) error {
 		buck := tx.Bucket(database.SHARES)
 
 		shareId, _ := buck.NextSequence()
 
 		shareData := database.Share{
-			Wallet: wallet,
-			Diff:   diff,
-			Time:   util.Time(),
+			Wallet:   wallet,
+			WorkerID: workerID, // NEW: Store worker ID in database
+			Diff:     diff,
+			Time:     util.Time(),
 		}
-
 		buck.Put(util.Itob(shareId), shareData.Serialize())
-
 		return nil
 	})
 }

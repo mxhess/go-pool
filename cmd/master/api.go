@@ -15,6 +15,7 @@
  * along with go-pool. If not, see <http://www.gnu.org/licenses/>.
  */
 
+
 package main
 
 import (
@@ -22,6 +23,7 @@ import (
 	"go-pool/config"
 	"go-pool/database"
 	"go-pool/logger"
+	"go-pool/util"
 	"math"
 	"strconv"
 
@@ -39,6 +41,16 @@ type PubWithdraw struct {
 	Timestamp    uint64  `json:"time"`
 	Amount       float64 `json:"amount"`
 	Destinations int     `json:"destinations"`
+}
+
+// NEW: Worker response structure for API
+type WorkerResponse struct {
+	Identifier string  `json:"identifier"`
+	Name       string  `json:"name"`
+	Hashrate   float64 `json:"hashrate"`
+	Shares     uint32  `json:"shares"`
+	Timestamp  uint64  `json:"timestamp"`
+	Node       string  `json:"node"`
 }
 
 var Coin float64
@@ -102,9 +114,7 @@ func StartApiServer() {
 			"withdrawals":          ws,
 
 			// stats that do not change
-
-			"pool_fee_percent": config.Cfg.MasterConfig.FeePercent,
-			// "stratums":          config.Cfg.MasterConfig.Stratums,
+			"pool_fee_percent":  config.Cfg.MasterConfig.FeePercent,
 			"payment_threshold": config.Cfg.MasterConfig.MinWithdrawal,
 		})
 	})
@@ -157,7 +167,17 @@ func StartApiServer() {
 					})
 				}
 			}
+		}
 
+		// NEW: Get worker count for this address
+		workerCount := 0
+		if addressWorkers, exists := Stats.KnownWorkers[addr]; exists {
+			for _, lastActive := range addressWorkers {
+				// Count workers active in last hour
+				if util.Time()-lastActive <= 3600 {
+					workerCount++
+				}
+			}
 		}
 
 		c.JSON(200, gin.H{
@@ -170,7 +190,35 @@ func StartApiServer() {
 			"est_pending":     NotNan(Round6(GetEstPendingBalance(addr))),
 			"hr_chart":        Stats.HashrateCharts[addr],
 			"withdrawals":     uw,
+			"worker_count":    workerCount, // NEW: Include worker count
 		})
+	})
+
+	// NEW: Workers endpoint
+	r.GET("/workers/:addr", func(c *gin.Context) {
+		c.Header("Cache-Control", "max-age=5")
+
+		addr := c.Param("addr")
+
+		Stats.RLock()
+		defer Stats.RUnlock()
+
+		workers := GetAddressWorkers(addr)
+
+		// Convert to response format matching your Python API expectations
+		response := make([]WorkerResponse, len(workers))
+		for i, worker := range workers {
+			response[i] = WorkerResponse{
+				Identifier: worker.WorkerID,
+				Name:       worker.WorkerID,
+				Hashrate:   worker.Hashrate,
+				Shares:     worker.Shares,
+				Timestamp:  worker.LastActive,
+				Node:       "go-pool", // Static since it's single node
+			}
+		}
+
+		c.JSON(200, response)
 	})
 
 	r.GET("/info", func(c *gin.Context) {
@@ -204,3 +252,4 @@ func Round3(n float64) float64 {
 func Round6(n float64) float64 {
 	return math.Round(n*1000000) / 1000000
 }
+

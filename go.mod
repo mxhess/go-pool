@@ -3,11 +3,14 @@ module go-pool
 go 1.21
 
 require (
-	github.com/duggavo/go-monero v0.4.4
 	github.com/gin-gonic/gin v1.9.1
 	go.etcd.io/bbolt v1.3.8
 	golang.org/x/crypto v0.17.0
 )
+
+require github.com/kr/pretty v0.3.1 // indirect
+
+replace github.com/mxhess/go-salvium => ../go-salvium
 
 require (
 	github.com/bytedance/sonic v1.10.2 // indirect
@@ -25,6 +28,7 @@ require (
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.2 // indirect
+	github.com/mxhess/go-salvium v0.0.0-20231211202512-776f5877ebee
 	github.com/pelletier/go-toml/v2 v2.1.1 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/ugorji/go/codec v1.2.12 // indirect

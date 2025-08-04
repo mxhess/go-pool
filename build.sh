@@ -11,4 +11,4 @@ env CGO_ENABLED=0 go build -trimpath
 cp ./slave ../../build/
 
 cd ../..
-cp -r ./docs ./build/
+#cp -r ./docs ./build/
