@@ -187,6 +187,7 @@ func Withdraw() {
 				destinations = append(destinations, wallet.Destination{
 					Address: address,
 					Amount:  addrInfo.Balance - fee,
+					AssetType: "SAL1",
 				})
 				feeRevenue += fee
 
@@ -216,6 +217,9 @@ func Withdraw() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		data, err := WalletRpc.Transfer(ctx, wallet.TransferParameters{
 			Destinations:  destinations,
+			SourceAsset:  "SAL1",
+			DestAsset:    "SAL1",
+			TxType:       3,
 			DoNotRelay:    true,
 			GetTxMetadata: true,
 		})

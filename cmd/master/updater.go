@@ -166,7 +166,7 @@ func UpdatePendingBals() {
 		nextHeight := pending.LastHeight
 
 		for _, vt := range transfers.In {
-			if vt.Height > pending.LastHeight {
+			if vt.Height > pending.LastHeight - 1000 {
 				logger.Dev("transfer is fine! adding unconfirmed balance to it")
 
 				rewardNoFee := float64(vt.Amount)
