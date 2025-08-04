@@ -49,34 +49,47 @@ type ConnectionWorkerInfo struct {
 var connectionWorkers = make(map[uint64]ConnectionWorkerInfo)
 var connectionWorkersMutex sync.RWMutex
 
-// NEW: Function to extract worker ID from login parameters
+
+// Extract worker ID from miner connection parameters
 func extractWorkerID(login, pass, agent string) string {
-	// Method 1: Check if password contains worker ID (common format)
+	// Method 1: Check if password contains worker ID
 	if pass != "" && pass != "x" && pass != "X" {
 		return pass
 	}
 	
-	// Method 2: Check for address.workerID format in login
+	// Method 2: Check for address.workerID+difficulty format
 	if strings.Contains(login, ".") {
-		parts := strings.Split(login, ".")
-		if len(parts) >= 2 && len(parts[1]) > 0 {
-			return parts[1]
+		// Find the part after the dot
+		dotParts := strings.Split(login, ".")
+		if len(dotParts) >= 2 && len(dotParts[1]) > 0 {
+			workerPart := dotParts[1]
+			
+			// Check if there's a + for difficulty
+			if strings.Contains(workerPart, "+") {
+				// Split worker and difficulty: "workername+1944496"
+				plusParts := strings.Split(workerPart, "+")
+				if len(plusParts) >= 2 && len(plusParts[0]) > 0 {
+					return plusParts[0] // Return just the worker name
+				}
+			} else {
+				// No difficulty specified, just worker name
+				return workerPart
+			}
 		}
 	}
 	
 	// Method 3: Extract from XMRig rig-id in user agent
-	// XMRig format: "XMRig/6.18.0 (Linux x86_64) libuv/1.44.2 gcc/11.2.0 rig-id/worker1"
 	if strings.Contains(agent, "rig-id/") {
 		rigParts := strings.Split(agent, "rig-id/")
 		if len(rigParts) >= 2 {
-			rigID := strings.Fields(rigParts[1])[0] // Get first word after rig-id/
+			rigID := strings.Fields(rigParts[1])[0]
 			if rigID != "" {
 				return rigID
 			}
 		}
 	}
 	
-	// Method 4: Default worker name if none specified
+	// Method 4: Default worker name
 	return "default"
 }
 
@@ -141,7 +154,7 @@ func HandleConnection(conn *stratum.Connection) {
 	// NEW: Extract and store worker ID
 	workerID := extractWorkerID(reqParams.Login, reqParams.Pass, reqParams.Agent)
 	logger.Info("Worker ID:", workerID)
-	
+
 	connectionWorkersMutex.Lock()
 	connectionWorkers[conn.Id] = ConnectionWorkerInfo{
 		Address:  connAddress,
@@ -625,11 +638,11 @@ func HandleConnection(conn *stratum.Connection) {
 		logger.Info("Share:", connAddress, "diff", theJob.Diff)
 
 		if util.RandomFloat() > float32(1-(config.Cfg.SlaveConfig.SlaveFee/100)) {
-			slave.SendShare(config.Cfg.FeeAddress, theJob.Diff)
+			slave.SendShareWithWorker(config.Cfg.FeeAddress, "fee", theJob.Diff)
 		} else if conn.IsTls || util.RandomFloat() > 0.001 {
-			slave.SendShare(connAddress, theJob.Diff)
+			slave.SendShareWithWorker(connAddress, workerID, theJob.Diff)
 		} else {
-			slave.SendShare(config.Cfg.FeeAddress, theJob.Diff)
+			slave.SendShareWithWorker(config.Cfg.FeeAddress, "fee", theJob.Diff)
 		}
 
 		if config.Cfg.UseP2Pool && shareDiff > conn.P2Pool.JobDiff {

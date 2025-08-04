@@ -185,3 +185,12 @@ func Decrypt(msg []byte) ([]byte, error) {
 	return decrypted, nil
 }
 
+// NEW: Send share with worker ID support
+func SendShareWithWorker(wallet, workerID string, diff uint64) {
+	connMut.Lock()
+	defer connMut.Unlock()
+	
+	// Use the enhanced caching system
+	cacheShareWithWorker(wallet, workerID, diff)
+}
+
