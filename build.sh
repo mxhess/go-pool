@@ -12,3 +12,5 @@ cp ./slave ../../build/
 
 cd ../..
 #cp -r ./docs ./build/
+cp config.json ./build/
+

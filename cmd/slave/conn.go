@@ -621,28 +621,15 @@ func HandleConnection(conn *stratum.Connection) {
 
 		conn.Score += 1
 
-		// NEW: Get worker info for this connection
-		connectionWorkersMutex.RLock()
-		workerInfo, exists := connectionWorkers[conn.Id]
-		connectionWorkersMutex.RUnlock()
-
-		if !exists {
-			// Fallback if worker info is missing
-			workerInfo = ConnectionWorkerInfo{
-				Address:  connAddress,
-				WorkerID: "unknown",
-			}
-		}
 
 		logger.Info("Share:", connAddress, "diff", theJob.Diff)
 
-		// MODIFIED: Send share with worker ID
 		if util.RandomFloat() > float32(1-(config.Cfg.SlaveConfig.SlaveFee/100)) {
-			slave.SendShareWithWorker(config.Cfg.FeeAddress, "fee", theJob.Diff)
+			slave.SendShare(config.Cfg.FeeAddress, theJob.Diff)
 		} else if conn.IsTls || util.RandomFloat() > 0.001 {
-			slave.SendShareWithWorker(workerInfo.Address, workerInfo.WorkerID, theJob.Diff)
+			slave.SendShare(connAddress, theJob.Diff)
 		} else {
-			slave.SendShareWithWorker(config.Cfg.FeeAddress, "fee", theJob.Diff)
+			slave.SendShare(config.Cfg.FeeAddress, theJob.Diff)
 		}
 
 		if config.Cfg.UseP2Pool && shareDiff > conn.P2Pool.JobDiff {
