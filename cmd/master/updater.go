@@ -59,7 +59,10 @@ func Updater() {
 		if info.Height != MasterInfo.Height {
 			logger.Info("📊 New height", MasterInfo.Height, "->", info.Height)
 			MasterInfo.Height = info.Height
-			Stats.NetHashrate = float64(info.Difficulty) / float64(config.BlockTime)
+			MasterInfo.Lock()
+			MasterInfo.Difficulty = info.Difficulty
+			MasterInfo.Unlock()
+
 			config.BlockTime = info.Target
 			MasterInfo.Unlock()
 
@@ -92,6 +95,7 @@ func UpdateReward() {
 	MasterInfo.Lock()
 	defer MasterInfo.Unlock()
 	MasterInfo.BlockReward = info.BlockHeader.Reward
+
 }
 
 var minHeight uint64

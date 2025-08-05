@@ -19,6 +19,7 @@ package main
 
 import (
 	"time"
+	"go-pool/logger"
 )
 
 type PendingBals struct {
@@ -28,32 +29,17 @@ type PendingBals struct {
 }
 
 func OnBlockFound(height, rew uint64, hash string) {
-	Stats.Lock()
-	defer Stats.Unlock()
-
-	Stats.LastBlock = LastBlock{
-		Height:    height,
-		Timestamp: time.Now().Unix(),
-		Reward:    rew,
-		Hash:      hash,
-	}
-
-	Stats.BlocksFound = append([]FoundInfo{{
-		Height: height,
-		Hash:   hash,
-	}}, Stats.BlocksFound...)
-
-	Stats.NumFound++
-	Stats.Cleanup()
+    logger.Info("🎉 Block found! Height:", height, "Reward:", rew, "Hash:", hash)
+    
+    // Just call BlockFound - no Stats updates needed
+    BlockFound(0, "", hash, height, rew)
+    
 }
 
 func OnP2PoolShareFound(height uint64) {
-	Stats.Lock()
-	defer Stats.Unlock()
-	Stats.LastBlock = LastBlock{
-		Height:    height,
-		Timestamp: time.Now().Unix(),
-	}
-	Stats.NumFound++
-	Stats.Cleanup()
+    logger.Info("P2Pool share found at height:", height)
+    
+    // If you need to track P2Pool shares, store them in SQLite
+    // For now, just log it - no Stats updates needed
 }
+

@@ -727,3 +727,139 @@ func (l *LedgerDB) Conn() *sql.DB {
 	return l.db
 }
 
+func (l *LedgerDB) StorePoolStats(stats PoolStats) error {
+    query := `
+        INSERT OR REPLACE INTO pool_stats_history 
+        (timestamp, pool_hashrate, network_hashrate, network_difficulty, 
+         connected_miners, connected_workers, round_shares, blocks_found)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `
+    _, err := l.db.Exec(query, 
+        stats.Timestamp, 
+        stats.TotalHashrate,     // Use TotalHashrate from models.go version
+        stats.NetworkHashrate,
+        stats.NetworkDifficulty,
+        stats.ConnectedMiners,
+        stats.ConnectedWorkers,
+        0,  // RoundShares - not in models.go version, use 0 or calculate
+        stats.BlocksFound24h,    // Use BlocksFound24h
+    )
+    return err
+}
+
+// GetPoolStatsHistory retrieves pool stats for charting
+func (l *LedgerDB) GetPoolStatsHistory(hours int) ([]PoolStats, error) {
+    since := time.Now().Unix() - int64(hours*3600)
+    query := `
+        SELECT timestamp, pool_hashrate, network_hashrate, network_difficulty,
+               connected_miners, connected_workers, round_shares, blocks_found
+        FROM pool_stats_history
+        WHERE timestamp > ?
+        ORDER BY timestamp ASC
+    `
+    rows, err := l.db.Query(query, since)
+    if err != nil {
+        return nil, err
+    }
+    defer rows.Close()
+
+    var stats []PoolStats
+    for rows.Next() {
+        var s PoolStats
+        var roundShares uint64
+        var blocksFound int
+        
+        err := rows.Scan(&s.Timestamp, &s.TotalHashrate, &s.NetworkHashrate,
+            &s.NetworkDifficulty, &s.ConnectedMiners, &s.ConnectedWorkers,
+            &roundShares, &blocksFound)
+        if err != nil {
+            return nil, err
+        }
+        
+        // Map to the models.go fields
+        s.BlocksFound24h = blocksFound
+        
+        stats = append(stats, s)
+    }
+    return stats, rows.Err()
+}
+
+// StoreMinerHashrate stores miner hashrate history
+func (l *LedgerDB) StoreMinerHashrate(minerAddr string, hashrate5m, hashrate15m, hashrate1h float64, workerCount int) error {
+    query := `
+        INSERT OR REPLACE INTO miner_hashrate_history
+        (miner_addr, timestamp, hashrate_5m, hashrate_15m, hashrate_1h, worker_count)
+        VALUES (?, ?, ?, ?, ?, ?)
+    `
+    _, err := l.db.Exec(query, minerAddr, time.Now().Unix(), 
+        hashrate5m, hashrate15m, hashrate1h, workerCount)
+    return err
+}
+
+// GetMinerHashrateHistory retrieves miner hashrate history
+func (l *LedgerDB) GetMinerHashrateHistory(minerAddr string, hours int) ([]MinerHashratePoint, error) {
+    since := time.Now().Unix() - int64(hours*3600)
+    query := `
+        SELECT timestamp, hashrate_5m
+        FROM miner_hashrate_history
+        WHERE miner_addr = ? AND timestamp > ?
+        ORDER BY timestamp ASC
+    `
+    rows, err := l.db.Query(query, minerAddr, since)
+    if err != nil {
+        return nil, err
+    }
+    defer rows.Close()
+
+    var points []MinerHashratePoint
+    for rows.Next() {
+        var p MinerHashratePoint
+        err := rows.Scan(&p.Timestamp, &p.Hashrate)
+        if err != nil {
+            return nil, err
+        }
+        points = append(points, p)
+    }
+    return points, rows.Err()
+}
+
+// CleanupOldChartData removes chart data older than specified days
+func (l *LedgerDB) CleanupOldChartData(days int) error {
+    cutoff := time.Now().Unix() - int64(days*24*3600)
+    
+    queries := []string{
+        "DELETE FROM pool_stats_history WHERE timestamp < ?",
+        "DELETE FROM miner_hashrate_history WHERE timestamp < ?",
+        "DELETE FROM worker_hashrate_history WHERE timestamp < ?",
+    }
+    
+    for _, query := range queries {
+        if _, err := l.db.Exec(query, cutoff); err != nil {
+            return err
+        }
+    }
+    return nil
+}
+
+// GetRoundShares calculates shares since last block
+func (l *LedgerDB) GetRoundShares() (uint64, error) {
+    // Get timestamp of last found block
+    var lastBlockTime int64
+    err := l.db.QueryRow(`
+        SELECT MAX(timestamp) FROM recent_blocks WHERE status = 'confirmed'
+    `).Scan(&lastBlockTime)
+    if err != nil || lastBlockTime == 0 {
+        // No blocks found yet, count all shares
+        lastBlockTime = 0
+    }
+
+    // Sum shares since last block
+    var roundShares uint64
+    err = l.db.QueryRow(`
+        SELECT COALESCE(SUM(difficulty), 0) FROM shares WHERE timestamp > ?
+    `, lastBlockTime).Scan(&roundShares)
+    
+    return roundShares, err
+}
+
+

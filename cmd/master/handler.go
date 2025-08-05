@@ -18,161 +18,166 @@
 package main
 
 import (
-	"encoding/binary"
-	"encoding/hex"
-	"go-pool/config"
-	"go-pool/logger"
-	"go-pool/serializer"
-	"go-pool/util"
-	"io"
-	"math"
-	"net"
+        "encoding/binary"
+        "encoding/hex"
+        "go-pool/config"
+        "go-pool/logger"
+        "go-pool/serializer"
+        "go-pool/util"
+        "io"
+        "math"
+        "net"
+        "sync"
 )
 
 const Overhead = 40
 
-// numConns is locked by the mutex of Stats
-var numConns = make(map[uint64]uint32)
+// Connection tracking - we'll keep this simple in-memory tracking
+// since it's just for current connections, not persistent data
+var (
+        numConns   = make(map[uint64]uint32)
+        numConnsMu sync.RWMutex
+)
 
 func HandleSlave(conn net.Conn) {
-	var connId uint64 = util.RandomUint64()
+        var connId uint64 = util.RandomUint64()
 
-	for {
-		lenBuf := make([]byte, 2+Overhead)
-		_, err := io.ReadFull(conn, lenBuf)
-		if err != nil {
-			logger.Warn(err)
-			conn.Close()
-			Stats.Lock()
-			delete(numConns, connId)
-			Stats.Unlock()
-			return
-		}
-		lenBuf, err = Decrypt(lenBuf)
-		if err != nil {
-			logger.Warn(err)
-			conn.Close()
-			Stats.Lock()
-			delete(numConns, connId)
-			Stats.Unlock()
-			return
-		}
-		len := int(lenBuf[0]) | (int(lenBuf[1]) << 8)
+        // Cleanup function for when connection closes
+        cleanup := func() {
+                conn.Close()
+                numConnsMu.Lock()
+                delete(numConns, connId)
+                numConnsMu.Unlock()
+        }
 
-		// read the actual message
+        for {
+                lenBuf := make([]byte, 2+Overhead)
+                _, err := io.ReadFull(conn, lenBuf)
+                if err != nil {
+                        logger.Warn(err)
+                        cleanup()
+                        return
+                }
+                lenBuf, err = Decrypt(lenBuf)
+                if err != nil {
+                        logger.Warn(err)
+                        cleanup()
+                        return
+                }
+                len := int(lenBuf[0]) | (int(lenBuf[1]) << 8)
 
-		buf := make([]byte, len+Overhead)
-		_, err = io.ReadFull(conn, buf)
-		if err != nil {
-			logger.Warn(err)
-			conn.Close()
-			Stats.Lock()
-			delete(numConns, connId)
-			Stats.Unlock()
-			return
-		}
-		buf, err = Decrypt(buf)
-		if err != nil {
-			logger.Warn(err)
-			conn.Close()
-			Stats.Lock()
-			delete(numConns, connId)
-			Stats.Unlock()
-			return
-		}
-		logger.NetDev("Received message:", hex.EncodeToString(buf))
-		OnMessage(buf, connId)
-	}
+                // read the actual message
+                buf := make([]byte, len+Overhead)
+                _, err = io.ReadFull(conn, buf)
+                if err != nil {
+                        logger.Warn(err)
+                        cleanup()
+                        return
+                }
+                buf, err = Decrypt(buf)
+                if err != nil {
+                        logger.Warn(err)
+                        cleanup()
+                        return
+                }
+                logger.NetDev("Received message:", hex.EncodeToString(buf))
+                OnMessage(buf, connId)
+        }
 }
 
 func SendToConn(conn net.Conn, data []byte) {
-	var dataLenBin = make([]byte, 0, 2)
-	dataLenBin = binary.LittleEndian.AppendUint16(dataLenBin, uint16(len(data)))
-	conn.Write(Encrypt(dataLenBin))
-	conn.Write(Encrypt(data))
+        var dataLenBin = make([]byte, 0, 2)
+        dataLenBin = binary.LittleEndian.AppendUint16(dataLenBin, uint16(len(data)))
+        conn.Write(Encrypt(dataLenBin))
+        conn.Write(Encrypt(data))
 }
 
 func OnMessage(msg []byte, connId uint64) {
-	d := serializer.Deserializer{
-		Data: msg,
-	}
-	if d.Error != nil {
-		logger.Error(d.Error)
-		return
-	}
+        d := serializer.Deserializer{
+                Data: msg,
+        }
+        if d.Error != nil {
+                logger.Error(d.Error)
+                return
+        }
 
-	packet := d.ReadUint8()
+        packet := d.ReadUint8()
 
-	switch packet {
-	case 0: // Share Found packet
-		numShares := uint32(d.ReadUvarint())
-		wallet := d.ReadString()
-		workerID := d.ReadString() // Read worker ID
-		diff := d.ReadUvarint()
+        switch packet {
+        case 0: // Share Found packet
+                numShares := uint32(d.ReadUvarint())
+                wallet := d.ReadString()
+                workerID := d.ReadString() // Read worker ID
+                diff := d.ReadUvarint()
 
-		if d.Error != nil {
-			logger.Error(d.Error)
-			return
-		}
+                if d.Error != nil {
+                        logger.Error(d.Error)
+                        return
+                }
 
-		// Store worker info in stats before calling master function
-		Stats.Lock()
-		UpdateWorkerActivity(wallet, workerID)
-		Stats.Unlock()
+                // Worker activity is now tracked in SQLite via the share submission
+                // No need to update Stats
+                OnShareFound(wallet, diff, numShares, workerID)
 
-		// Pass worker ID to the function
-		OnShareFound(wallet, diff, numShares, workerID)
-	
-	case 1: // Block Found packet
-		if config.Cfg.UseP2Pool {
-			logger.Error("received Block Found packet; is using P2Pool")
-			return
-		}
+        case 1: // Block Found packet
+                if config.Cfg.UseP2Pool {
+                        logger.Error("received Block Found packet; is using P2Pool")
+                        return
+                }
 
-		height := d.ReadUvarint()
-		reward := d.ReadUvarint()
-		hash := hex.EncodeToString(d.ReadFixedByteArray(32))
+                height := d.ReadUvarint()
+                reward := d.ReadUvarint()
+                hash := hex.EncodeToString(d.ReadFixedByteArray(32))
 
-		if d.Error != nil {
-			logger.Error(d.Error)
-			return
-		}
+                if d.Error != nil {
+                        logger.Error(d.Error)
+                        return
+                }
 
-		logger.Info("Found block height", height, "reward", float64(reward)/math.Pow10(config.Cfg.Atomic), "hash", hash)
-		OnBlockFound(height, reward, hash)
-		
-	case 2: // Stats packet
-		conns := uint32(d.ReadUvarint())
+                logger.Info("Found block height", height, "reward", float64(reward)/math.Pow10(config.Cfg.Atomic), "hash", hash)
+                OnBlockFound(height, reward, hash)
 
-		if d.Error != nil {
-			logger.Error(d.Error)
-			return
-		}
+        case 2: // Stats packet - just track connection counts
+                conns := uint32(d.ReadUvarint())
 
-		func() {
-			Stats.Lock()
-			defer Stats.Unlock()
+                if d.Error != nil {
+                        logger.Error(d.Error)
+                        return
+                }
 
-			numConns[connId] = conns
+                // Just update connection tracking
+                numConnsMu.Lock()
+                numConns[connId] = conns
+                numConnsMu.Unlock()
 
-			Stats.Workers = 0
-			for _, v := range numConns {
-				Stats.Workers += v
-			}
-		}()
-		
-	case 3: // P2Pool Share Found
-		if !config.Cfg.UseP2Pool {
-			logger.Error("received P2Pool Share Found packet; is not using P2Pool")
-			return
-		}
+                // Worker count is now calculated from SQLite when needed
+                // No need to update Stats.Workers
 
-		height := d.ReadUvarint()
-		OnP2PoolShareFound(height)
+        case 3: // P2Pool Share Found
+                if !config.Cfg.UseP2Pool {
+                        logger.Error("received P2Pool Share Found packet; is not using P2Pool")
+                        return
+                }
 
-	default:
-		logger.Error("unknown packet type", packet)
-		return
-	}
+                height := d.ReadUvarint()
+                OnP2PoolShareFound(height)
+
+        default:
+                logger.Error("unknown packet type", packet)
+                return
+        }
+}
+
+// GetTotalWorkers calculates total workers from connection tracking
+// This is only used if you need real-time connection count
+func GetTotalWorkers() uint32 {
+        numConnsMu.RLock()
+        defer numConnsMu.RUnlock()
+        
+        var total uint32
+        for _, v := range numConns {
+                total += v
+        }
+        return total
 }
 

@@ -232,129 +232,245 @@ func GetPoolStats() (map[string]interface{}, error) {
 	return stats, nil
 }
 
-// Bridge function for compatibility with old API format
+// Bridge function for compatibility with old API format - now with sqlite
 func handleStatsOld(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Cache-Control", "max-age=10")
+    w.Header().Set("Content-Type", "application/json")
+    w.Header().Set("Access-Control-Allow-Origin", "*")
+    w.Header().Set("Cache-Control", "max-age=10")
 
-	path := strings.TrimPrefix(r.URL.Path, "/stats")
-	
-	if path == "" || path == "/" {
-		// Pool stats - return old format
-		MasterInfo.RLock()
-		height := MasterInfo.Height
-		blockReward := MasterInfo.BlockReward
-		MasterInfo.RUnlock()
+    path := strings.TrimPrefix(r.URL.Path, "/stats")
+    
+    if path == "" || path == "/" {
+        // Pool stats - ALL FROM SQLITE, NO STATS STRUCT!
+        
+        // Get blockchain info
+        MasterInfo.RLock()
+        height := MasterInfo.Height
+        blockReward := MasterInfo.BlockReward
+        difficulty := MasterInfo.Difficulty
+        MasterInfo.RUnlock()
 
-		Stats.RLock()
-		defer Stats.RUnlock()
+        // Get everything from SQLite
+        now := time.Now().Unix()
+        
+        // Get recent blocks
+        blocks, err := Ledger.GetRecentBlocks(50)
+        if err != nil {
+            logger.Warn("Failed to get blocks from database:", err)
+            blocks = []ledger.BlockInfo{}
+        }
+        
+        // Calculate pool hashrate from recent shares (5 min window)
+        windowStart := now - 300
+        shares, err := Ledger.GetSharesInWindow(windowStart)
+        if err != nil {
+            logger.Warn("Failed to get shares for pool hashrate:", err)
+            shares = []ledger.Share{}
+        }
+        
+        var totalDiff uint64
+        for _, share := range shares {
+            totalDiff += share.Difficulty
+        }
+        poolHashrate := float64(totalDiff) / 300.0 // H/s
+        
+        // Get active miners/workers count (active in last 10 minutes)
+        activeSince := now - 600
+        minerCount, err := Ledger.GetActiveMinerCount(activeSince)
+        if err != nil {
+            logger.Warn("Failed to get active miner count:", err)
+            minerCount = 0
+        }
+        
+        workerCount, err := Ledger.GetActiveWorkerCount(activeSince)
+        if err != nil {
+            logger.Warn("Failed to get active worker count:", err)
+            workerCount = 0
+        }
+        
+        // Get network hashrate from difficulty
+        netHashrate := float64(difficulty) / float64(config.BlockTime)
+        
+        // Find the most recent block
+        var lastBlock map[string]interface{}
+        var lastBlockTime int64
+        if len(blocks) > 0 {
+            for _, block := range blocks {
+                if block.Timestamp > lastBlockTime {
+                    lastBlockTime = block.Timestamp
+                    lastBlock = map[string]interface{}{
+                        "height":    block.Height,
+                        "timestamp": block.Timestamp,
+                        "reward":    Round3(float64(block.RewardTotal) / Coin),
+                        "hash":      block.Hash,
+                    }
+                }
+            }
+        }
+        
+        if lastBlock == nil {
+            lastBlock = map[string]interface{}{
+                "height":    0,
+                "timestamp": 0,
+                "reward":    0,
+                "hash":      "",
+            }
+        }
+        
+        // Format recent blocks
+        var recentBlocks []map[string]interface{}
+        blockCount := len(blocks)
+        if blockCount > 10 {
+            blockCount = 10
+        }
+        if blockCount > 0 {
+            recentBlocks = make([]map[string]interface{}, blockCount)
+            for i := 0; i < blockCount; i++ {
+                block := blocks[i]
+                recentBlocks[i] = map[string]interface{}{
+                    "height":    block.Height,
+                    "timestamp": block.Timestamp,
+                    "reward":    Round3(float64(block.RewardTotal) / Coin),
+                    "hash":      block.Hash,
+                }
+            }
+        }
+        
+        // Get round shares from database (shares since last block)
+        var roundShares uint64
+        if lastBlockTime > 0 {
+            roundSharesData, err := Ledger.GetSharesInWindow(lastBlockTime)
+            if err == nil {
+                for _, share := range roundSharesData {
+                    roundShares += share.Difficulty
+                }
+            }
+        }
+        
+        // Calculate effort
+        effort := float64(0)
+        if roundShares > 0 && difficulty > 0 {
+            effort = (float64(roundShares) / float64(difficulty)) * 100
+        }
+        
+        // Build response - NO STATS STRUCT USED!
+        response := map[string]interface{}{
+            "pool_hr":             Round0(poolHashrate),
+            "net_hr":              Round0(netHashrate),
+            "connected_addresses": minerCount,
+            "connected_workers":   workerCount,
+            "chart": map[string]interface{}{
+                "hashrate":  []interface{}{}, // Empty for now, or query from DB
+                "workers":   []interface{}{}, // Empty for now, or query from DB
+                "addresses": []interface{}{}, // Empty for now, or query from DB
+            },
+            "num_blocks_found":    len(blocks),
+            "recent_blocks_found": recentBlocks,
+            "height":              height,
+            "last_block":          lastBlock,
+            "reward":              Round3(float64(blockReward) / Coin),
+            "pplns_window_seconds": GetPplnsWindow(),
+            "withdrawals":          []interface{}{}, // Get from DB if needed
+            "pool_fee_percent":    config.Cfg.MasterConfig.FeePercent,
+            "payment_threshold":   config.Cfg.MasterConfig.MinWithdrawal,
+            "network_difficulty":  difficulty,
+            "round_hashes":        roundShares,
+            "effort":              Round3(effort),
+        }
+        
+        json.NewEncoder(w).Encode(response)
+        return
+    }
 
-		// Get actual blocks from database
-		blocks, err := Ledger.GetRecentBlocks(10)
-		if err != nil {
-			logger.Warn("Failed to get blocks from database:", err)
-		}
-		
-		// Format blocks for API
-		var recentBlocks []map[string]interface{}
-		if len(blocks) > 0 {
-			recentBlocks = make([]map[string]interface{}, len(blocks))
-			for i, block := range blocks {
-				recentBlocks[i] = map[string]interface{}{
-					"height":    block.Height,
-					"timestamp": block.Timestamp,
-					"reward":    float64(block.RewardTotal) / Coin,
-					"hash":      block.Hash,
-				}
-			}
-		}
+    // Miner stats - also from SQLite only
+    minerAddr := strings.TrimPrefix(path, "/")
+    if minerAddr == "" {
+        http.Error(w, "Missing miner address", http.StatusBadRequest)
+        return
+    }
 
-		// Return old API format
-		response := map[string]interface{}{
-			"pool_hr":             Stats.PoolHashrate,
-			"net_hr":              Stats.NetHashrate,
-			"connected_addresses": len(Stats.KnownAddresses),
-			"connected_workers":   Stats.Workers,
-			"chart": map[string]interface{}{
-				"hashrate":  Stats.PoolHashrateChart,
-				"workers":   Stats.WorkersChart,
-				"addresses": Stats.AddressesChart,
-			},
-			"num_blocks_found":    len(blocks),
-			"recent_blocks_found": recentBlocks,
-			"height":              height,
-			"last_block":          Stats.LastBlock,
-			"reward":              Round3(float64(blockReward) / Coin),
-			"pplns_window_seconds": GetPplnsWindow(),
-			"withdrawals":          Stats.RecentWithdrawals,
-			"pool_fee_percent":    config.Cfg.MasterConfig.FeePercent,
-			"payment_threshold":   config.Cfg.MasterConfig.MinWithdrawal,
-		}
-		
-		json.NewEncoder(w).Encode(response)
-		return
-	}
+    // Get balance from SQLite ledger
+    balance, err := Ledger.GetBalance(minerAddr)
+    if err != nil {
+        balance = &ledger.MinerBalance{
+            MinerAddr:        minerAddr,
+            BalanceConfirmed: 0,
+            BalancePending:   0,
+            TotalPaid:        0,
+            LastUpdated:      time.Now().Unix(),
+        }
+    }
 
-	// Miner stats - get address
-	minerAddr := strings.TrimPrefix(path, "/")
-	if minerAddr == "" {
-		http.Error(w, "Missing miner address", http.StatusBadRequest)
-		return
-	}
+    // Get recent shares for hashrate calculation
+    now := time.Now().Unix()
+    windowStart := now - 3600 // Last hour
+    shares, err := Ledger.GetMinerSharesInWindow(minerAddr, windowStart)
+    if err != nil {
+        logger.Warn("Failed to get miner shares:", err)
+        shares = []ledger.Share{}
+    }
 
-	// Get from old stats system
-	Stats.RLock()
-	defer Stats.RUnlock()
+    // Calculate hashrates
+    var hashrate5m, hashrate15m float64
+    var totalDiff5m, totalDiff15m uint64
 
-	// Get address info from old system
-	addrInfo, err := GetAddressInfoCompat(minerAddr)
-	if err != nil {
-		// Return empty stats if not found
-		addrInfo = &AddressInfoCompat{
-			Balance:        0,
-			BalancePending: 0,
-			Paid:           0,
-		}
-	}
+    for _, share := range shares {
+        age := now - share.Timestamp
+        if age <= 300 { // 5 minutes
+            totalDiff5m += share.Difficulty
+        }
+        if age <= 900 { // 15 minutes
+            totalDiff15m += share.Difficulty
+        }
+    }
 
-	// Build response in old format
-	uw := []UserWithdrawal{}
-	for _, v := range Stats.RecentWithdrawals {
-		for _, v2 := range v.Destinations {
-			if v2.Address == minerAddr {
-				uw = append(uw, UserWithdrawal{
-					Amount: float64(v2.Amount) / Coin,
-					Txid:   v.Txid,
-				})
-			}
-		}
-	}
+    // Convert to hashrate (H/s)
+    if totalDiff5m > 0 {
+        hashrate5m = float64(totalDiff5m) / 300.0
+    }
+    if totalDiff15m > 0 {
+        hashrate15m = float64(totalDiff15m) / 900.0
+    }
 
-	// Get worker count
-	workerCount := 0
-	if addressWorkers, exists := Stats.KnownWorkers[minerAddr]; exists {
-		for _, lastActive := range addressWorkers {
-			if GetCurrentTime()-lastActive <= 3600 {
-				workerCount++
-			}
-		}
-	}
+    // Get worker count
+    workers, err := Ledger.GetActiveWorkers(minerAddr, now-3600)
+    workerCount := 0
+    if err == nil {
+        workerCount = len(workers)
+    }
 
-	response := map[string]interface{}{
-		"hashrate_5m":     NotNan(Round0(Get5mHashrate(minerAddr))),
-		"hashrate_10m":    NotNan(Round0(Get15mHashrate(minerAddr))),
-		"hashrate_15m":    NotNan(Round0(Get15mHashrate(minerAddr))),
-		"balance":         NotNan(Round6(float64(addrInfo.Balance) / Coin)),
-		"balance_pending": NotNan(Round6(float64(addrInfo.BalancePending) / Coin)),
-		"paid":            NotNan(Round6(float64(addrInfo.Paid) / Coin)),
-		"est_pending":     NotNan(Round6(GetEstPendingBalance(minerAddr))),
-		"hr_chart":        Stats.HashrateCharts[minerAddr],
-		"withdrawals":     uw,
-		"worker_count":    workerCount,
-	}
+    // Get withdrawals from database
+    withdrawals, err := Ledger.GetMinerWithdrawals(minerAddr, 10)
+    if err != nil {
+        withdrawals = []ledger.Withdrawal{}
+    }
 
-	json.NewEncoder(w).Encode(response)
+    // Format withdrawals
+    uw := make([]UserWithdrawal, len(withdrawals))
+    for i, w := range withdrawals {
+        uw[i] = UserWithdrawal{
+            Amount: float64(w.Amount) / Coin,
+            Txid:   w.TxID,
+        }
+    }
+
+    // Build hashrate chart (empty for now, or query from DB)
+    hrChart := []map[string]interface{}{}
+
+    response := map[string]interface{}{
+        "hashrate_5m":     NotNan(Round0(hashrate5m)),
+        "hashrate_10m":    NotNan(Round0(hashrate15m)), // Using 15m for 10m
+        "hashrate_15m":    NotNan(Round0(hashrate15m)),
+        "balance":         NotNan(Round6(float64(balance.BalanceConfirmed) / Coin)),
+        "balance_pending": NotNan(Round6(float64(balance.BalancePending) / Coin)),
+        "paid":            NotNan(Round6(float64(balance.TotalPaid) / Coin)),
+        "est_pending":     0, // Calculate if needed
+        "hr_chart":        hrChart,
+        "withdrawals":     uw,
+        "worker_count":    workerCount,
+    }
+
+    json.NewEncoder(w).Encode(response)
 }
 
 // Compatibility types
@@ -371,9 +487,17 @@ type AddressInfoCompat struct {
 
 // Get address info from somewhere (you might need to implement this based on your old system)
 func GetAddressInfoCompat(addr string) (*AddressInfoCompat, error) {
-	// TODO: Get this from your existing stats or database
-	// For now, return empty
-	return &AddressInfoCompat{}, nil
+	// Get from SQLite ledger
+	balance, err := Ledger.GetBalance(addr)
+	if err != nil {
+		return &AddressInfoCompat{}, err
+	}
+	
+	return &AddressInfoCompat{
+		Balance:        balance.BalanceConfirmed,
+		BalancePending: balance.BalancePending,
+		Paid:           balance.TotalPaid,
+	}, nil
 }
 
 // Get current time helper
@@ -404,7 +528,7 @@ func StartApiServer() {
 	go startAPI()
 }
 
-// Handle worker stats endpoint
+// Handle worker stats endpoint with corrected field names
 func handleWorkers(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -429,7 +553,7 @@ func handleWorkers(w http.ResponseWriter, r *http.Request) {
 		workers = []ledger.WorkerStats{}
 	}
 
-	// Format response
+	// Format response with proper field names for frontend
 	currentTime := time.Now().Unix()
 	response := make([]map[string]interface{}, len(workers))
 	for i, worker := range workers {
@@ -443,6 +567,9 @@ func handleWorkers(w http.ResponseWriter, r *http.Request) {
 		}
 		
 		response[i] = map[string]interface{}{
+			// Frontend expects these exact field names
+			"identifier":       worker.WorkerID,  // Frontend uses "identifier"
+			"name":             worker.WorkerID,  // Also provide as "name"
 			"worker_id":        worker.WorkerID,
 			"shares_total":     worker.ShareCount,
 			"shares_in_window": worker.SharesInWindow,
@@ -451,6 +578,7 @@ func handleWorkers(w http.ResponseWriter, r *http.Request) {
 			"hashrate":         Round0(worker.Hashrate),
 			"status":           status,
 			"active":           isActive,
+			"timestamp":        currentTime,
 		}
 	}
 

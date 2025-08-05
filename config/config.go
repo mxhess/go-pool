@@ -95,8 +95,13 @@ type MasterConfig struct {
 	WithdrawalFee    float64       `json:"withdrawal_fee"`
 	MinWithdrawal    float64       `json:"min_withdrawal"`
 	WithdrawInterval int64         `json:"withdrawal_interval_minutes"`
+	PPLNSTargetShares uint64       `json:"pplns_target_shares"` // Target N for PPLNS
+	PPLNSMinWindow    float64      `json:"pplns_min_window"`    // Min window as % of net diff (0.5 = 50%)
+	PPLNSMaxWindow    float64      `json:"pplns_max_window"`    // Max window as % of net diff (5.0 = 500%)
+	PPLNSLuckFactor   float64      `json:"pplns_luck_factor"`   // Adjustment factor (0.1 = 10%)
 	Stratums         []StratumAddr `json:"stratums"`
 }
+
 type SlaveConfig struct {
 	MasterAddress string `json:"master_address"`
 

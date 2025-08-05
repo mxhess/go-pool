@@ -253,3 +253,8 @@ type BlockInfo struct {
 // MinerBalance is an alias for Balance for API compatibility
 type MinerBalance = Balance
 
+type MinerHashratePoint struct {
+    Timestamp int64    `db:"timestamp" json:"timestamp"`
+    Hashrate  float64  `db:"hashrate" json:"hashrate"`
+}
+
