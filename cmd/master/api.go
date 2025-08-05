@@ -15,241 +15,157 @@
  * along with go-pool. If not, see <http://www.gnu.org/licenses/>.
  */
 
-
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"go-pool/config"
-	"go-pool/database"
 	"go-pool/logger"
-	"go-pool/util"
 	"math"
+	"net/http"
 	"strconv"
-
-	"github.com/gin-gonic/gin"
-	bolt "go.etcd.io/bbolt"
+	"strings"
+	"time"
 )
 
-type UserWithdrawal struct {
-	Amount float64 `json:"amount"`
-	Txid   string  `json:"txid"`
+var Coin = math.Pow10(config.Cfg.Atomic)
+
+func Round0(val float64) float64 {
+	return math.Round(val)
 }
 
-type PubWithdraw struct {
-	Txid         string  `json:"txid"`
-	Timestamp    uint64  `json:"time"`
-	Amount       float64 `json:"amount"`
-	Destinations int     `json:"destinations"`
+func Round3(val float64) float64 {
+	return math.Round(val*1000) / 1000
 }
 
-// NEW: Worker response structure for API
-type WorkerResponse struct {
-	Identifier string  `json:"identifier"`
-	Name       string  `json:"name"`
-	Hashrate   float64 `json:"hashrate"`
-	Shares     uint32  `json:"shares"`
-	Timestamp  uint64  `json:"timestamp"`
-	Node       string  `json:"node"`
+func Round6(val float64) float64 {
+	return math.Round(val*1000000) / 1000000
 }
 
-var Coin float64
-
-func StartApiServer() {
-	Coin = math.Pow10(config.Cfg.Atomic)
-
-	gin.SetMode("release")
-	r := gin.Default()
-	r.SetTrustedProxies([]string{
-		"127.0.0.1",
-	})
-
-	r.GET("/ping", func(c *gin.Context) {
-		c.String(200, "pong")
-	})
-
-	r.GET("/stats", func(c *gin.Context) {
-		c.Header("Cache-Control", "max-age=10")
-
-		MasterInfo.RLock()
-		defer MasterInfo.RUnlock()
-
-		Stats.RLock()
-		defer Stats.RUnlock()
-
-		var ws = make([]PubWithdraw, 0, len(Stats.RecentWithdrawals))
-
-		for _, v := range Stats.RecentWithdrawals {
-			var x uint64
-			for _, v2 := range v.Destinations {
-				x += v2.Amount
-			}
-
-			ws = append(ws, PubWithdraw{
-				Txid:         v.Txid,
-				Timestamp:    v.Timestamp,
-				Amount:       Round6(float64(x) / math.Pow10(config.Cfg.Atomic)),
-				Destinations: len(v.Destinations),
-			})
-		}
-
-		c.JSON(200, gin.H{
-			"pool_hr":             Stats.PoolHashrate,
-			"net_hr":              Stats.NetHashrate,
-			"connected_addresses": len(Stats.KnownAddresses),
-			"connected_workers":   Stats.Workers,
-			"chart": gin.H{
-				"hashrate":  Stats.PoolHashrateChart,
-				"workers":   Stats.WorkersChart,
-				"addresses": Stats.AddressesChart,
-			},
-			"num_blocks_found":    Stats.NumFound,
-			"recent_blocks_found": Stats.BlocksFound,
-			"height":              MasterInfo.Height,
-			"last_block":          Stats.LastBlock,
-
-			"reward": Round3(float64(MasterInfo.BlockReward) / math.Pow10(config.Cfg.Atomic)),
-
-			"pplns_window_seconds": GetPplnsWindow(),
-			"withdrawals":          ws,
-
-			// stats that do not change
-			"pool_fee_percent":  config.Cfg.MasterConfig.FeePercent,
-			"payment_threshold": config.Cfg.MasterConfig.MinWithdrawal,
-		})
-	})
-
-	r.GET("/stats/:addr", func(c *gin.Context) {
-		c.Header("Cache-Control", "max-age=10")
-
-		addr := c.Param("addr")
-
-		if addr == config.Cfg.PoolAddress {
-			if c.RemoteIP() != "127.0.0.1" {
-				c.JSON(404, gin.H{
-					"error": gin.H{
-						"code":    1, // address not found
-						"message": "address not found",
-					},
-				})
-				return
-			}
-		}
-
-		addrInfo := database.AddrInfo{}
-
-		err := DB.View(func(tx *bolt.Tx) error {
-			buck := tx.Bucket(database.ADDRESS_INFO)
-
-			addrData := buck.Get([]byte(addr))
-			if addrData == nil {
-				return fmt.Errorf("unknown address %s", addr)
-			}
-
-			return addrInfo.Deserialize(addrData)
-		})
-
-		if err != nil {
-			logger.Debug(err)
-		}
-
-		Stats.RLock()
-		defer Stats.RUnlock()
-
-		uw := []UserWithdrawal{}
-
-		for _, v := range Stats.RecentWithdrawals {
-			for _, v2 := range v.Destinations {
-				if v2.Address == addr {
-					uw = append(uw, UserWithdrawal{
-						Amount: float64(v2.Amount) / Coin,
-						Txid:   v.Txid,
-					})
-				}
-			}
-		}
-
-		// NEW: Get worker count for this address
-		workerCount := 0
-		if addressWorkers, exists := Stats.KnownWorkers[addr]; exists {
-			for _, lastActive := range addressWorkers {
-				// Count workers active in last hour
-				if util.Time()-lastActive <= 3600 {
-					workerCount++
-				}
-			}
-		}
-
-		c.JSON(200, gin.H{
-			"hashrate_5m":     NotNan(Round0(Get5mHashrate(addr))),
-			"hashrate_10m":    NotNan(Round0(Get15mHashrate(addr))),
-			"hashrate_15m":    NotNan(Round0(Get15mHashrate(addr))),
-			"balance":         NotNan(Round6(float64(addrInfo.Balance) / Coin)),
-			"balance_pending": NotNan(Round6(float64(addrInfo.BalancePending) / Coin)),
-			"paid":            NotNan(Round6(float64(addrInfo.Paid) / Coin)),
-			"est_pending":     NotNan(Round6(GetEstPendingBalance(addr))),
-			"hr_chart":        Stats.HashrateCharts[addr],
-			"withdrawals":     uw,
-			"worker_count":    workerCount, // NEW: Include worker count
-		})
-	})
-
-	// NEW: Workers endpoint
-	r.GET("/workers/:addr", func(c *gin.Context) {
-		c.Header("Cache-Control", "max-age=5")
-
-		addr := c.Param("addr")
-
-		Stats.RLock()
-		defer Stats.RUnlock()
-
-		workers := GetAddressWorkers(addr)
-
-		// Convert to response format matching your Python API expectations
-		response := make([]WorkerResponse, len(workers))
-		for i, worker := range workers {
-			response[i] = WorkerResponse{
-				Identifier: worker.WorkerID,
-				Name:       worker.WorkerID,
-				Hashrate:   worker.Hashrate,
-				Shares:     worker.Shares,
-				Timestamp:  worker.LastActive,
-				Node:       "go-pool", // Static since it's single node
-			}
-		}
-
-		c.JSON(200, response)
-	})
-
-	r.GET("/info", func(c *gin.Context) {
-		c.Header("Cache-Control", "max-age=3600")
-		c.JSON(200, gin.H{
-			"pool_fee_percent":  config.Cfg.MasterConfig.FeePercent,
-			"stratums":          config.Cfg.MasterConfig.Stratums,
-			"payment_threshold": config.Cfg.MasterConfig.MinWithdrawal,
-		})
-	})
-
-	err := r.Run("0.0.0.0:" + strconv.FormatInt(int64(config.Cfg.MasterConfig.ApiPort), 10))
-	if err != nil {
-		panic(err)
-	}
-}
-
-func NotNan(n float64) float64 {
-	if math.IsNaN(n) {
+func NotNan(val float64) float64 {
+	if math.IsNaN(val) {
 		return 0
 	}
-	return n
+	return val
 }
 
-func Round0(n float64) float64 {
-	return math.Round(n)
+// ✅ PURE SQLITE MINER STATS - NO BOLT GARBAGE!
+func GetMinerStats(address string) (map[string]interface{}, error) {
+	logger.Debug("📊 Getting miner stats via SQLite ledger for:", address)
+
+	// Get balance from SQLite ledger
+	balance, err := Ledger.GetBalance(address)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get balance: %w", err)
+	}
+
+	// Get recent performance data
+	// TODO: Implement hashrate calculation from shares
+
+	stats := map[string]interface{}{
+		"address":         address,
+		"balance":         NotNan(Round6(float64(balance.BalanceConfirmed) / Coin)),
+		"balance_pending": NotNan(Round6(float64(balance.BalancePending) / Coin)),
+		"paid":           NotNan(Round6(float64(balance.TotalPaid) / Coin)),
+		"hashrate_5m":    0,    // TODO: Calculate from recent shares
+		"hashrate_15m":   0,    // TODO: Calculate from recent shares  
+		"hashrate_1h":    0,    // TODO: Calculate from recent shares
+		"worker_count":   0,    // TODO: Get from workers table
+		"last_seen":      balance.LastUpdated,
+		"withdrawals":    []interface{}{}, // TODO: Get recent withdrawals
+	}
+
+	logger.Debug("✅ Miner stats retrieved from SQLite ledger")
+	return stats, nil
 }
-func Round3(n float64) float64 {
-	return math.Round(n*1000) / 1000
+
+// ✅ PURE SQLITE POOL STATS
+func GetPoolStats() (map[string]interface{}, error) {
+	logger.Debug("📊 Getting pool stats via SQLite ledger")
+
+	// Get recent blocks
+	blocks, err := Ledger.GetRecentBlocks(10)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get recent blocks: %w", err)
+	}
+
+	// Get top miners
+	topMiners, err := Ledger.GetTopMiners(10)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get top miners: %w", err)
+	}
+
+	// TODO: Calculate pool hashrate from recent shares
+	// TODO: Get connected miners/workers count
+
+	stats := map[string]interface{}{
+		"pool_hashrate":    0,    // TODO: Calculate from shares
+		"connected_miners": 0,    // TODO: Get from workers table
+		"connected_workers": 0,   // TODO: Get from workers table
+		"blocks_found":     len(blocks),
+		"recent_blocks":    blocks,
+		"top_miners":       topMiners,
+		"pool_fee_percent": config.Cfg.MasterConfig.FeePercent,
+		"min_payout":       config.Cfg.MasterConfig.MinWithdrawal,
+		"last_update":      time.Now().Unix(),
+	}
+
+	logger.Debug("✅ Pool stats retrieved from SQLite ledger")
+	return stats, nil
 }
-func Round6(n float64) float64 {
-	return math.Round(n*1000000) / 1000000
+
+// ✅ CLEAN API HANDLERS
+func handleStats(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	path := strings.TrimPrefix(r.URL.Path, "/stats")
+
+	if path == "" || path == "/" {
+		// Pool stats
+		stats, err := GetPoolStats()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(stats)
+		return
+	}
+
+	// Remove leading slash for miner address
+	minerAddr := strings.TrimPrefix(path, "/")
+	if minerAddr == "" {
+		http.Error(w, "Missing miner address", http.StatusBadRequest)
+		return
+	}
+
+	// Miner stats
+	stats, err := GetMinerStats(minerAddr)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	json.NewEncoder(w).Encode(stats)
+}
+
+// ✅ START CLEAN API SERVER
+func startAPI() {
+	addr := ":" + strconv.Itoa(int(config.Cfg.MasterConfig.ApiPort))
+
+	http.HandleFunc("/stats", handleStats)
+	http.HandleFunc("/stats/", handleStats)
+
+	logger.Info("🌐 Pure SQLite API server starting on", addr)
+
+	if err := http.ListenAndServe(addr, nil); err != nil {
+		logger.Fatal("API server failed:", err)
+	}
+}
+
+// Bridge function for compatibility
+func StartApiServer() {
+	go startAPI()
 }
 

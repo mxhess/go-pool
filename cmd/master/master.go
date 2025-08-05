@@ -20,190 +20,169 @@ package main
 import (
 	"go-pool/address"
 	"go-pool/config"
-	"go-pool/database"
+	"go-pool/pkg/ledger"
 	"go-pool/logger"
-	"go-pool/util"
 	"math"
 	"net"
 	"sync"
-
+	"time"
+	
 	"github.com/mxhess/go-salvium/rpc"
 	"github.com/mxhess/go-salvium/rpc/daemon"
-	bolt "go.etcd.io/bbolt"
+	"github.com/mxhess/go-salvium/rpc/wallet"
 )
 
 type Info struct {
-	BlockReward uint64
 	Height      uint64
-
+	BlockReward uint64
 	sync.RWMutex
 }
 
 var MasterInfo Info
 
-var DB *bolt.DB
+// ✅ PURE SQLITE LEDGER - NO MORE BOLTDB GARBAGE!
+var Ledger *ledger.LedgerDB
+
+// RPC Clients
+var DaemonRpc *daemon.Client
+var WalletRpc *wallet.Client
 
 func main() {
 	if !address.IsAddressValid(config.Cfg.PoolAddress) || !address.IsAddressValid(config.Cfg.FeeAddress) {
 		logger.Fatal("Pool or fee address are not valid")
 	}
 
+	// ✅ INITIALIZE PURE SQLITE LEDGER
 	var err error
-	DB, err = bolt.Open("pool.db", 0o600, bolt.DefaultOptions)
-
+	Ledger, err = ledger.NewLedgerDB("pool.db")
 	if err != nil {
-		logger.Fatal(err)
+		logger.Fatal("Failed to initialize SQLite ledger:", err)
 	}
+	defer Ledger.Close()
 
-	err = DB.Update(func(tx *bolt.Tx) error {
-		_, err := tx.CreateBucketIfNotExists(database.ADDRESS_INFO)
-		if err != nil {
-			return err
-		}
-		_, err = tx.CreateBucketIfNotExists(database.PENDING)
-		if err != nil {
-			return err
-		}
-		_, err = tx.CreateBucketIfNotExists(database.SHARES)
+	logger.Info("🚀 PURE SQLITE MINING POOL STARTED - BOLTDB ELIMINATED!")
 
-		return err
-	})
-	if err != nil {
-		logger.Fatal(err)
-	}
-
-	DatabaseCleanup()
-
-	StartWallet()
-
-	srv, err := net.Listen("tcp", config.Cfg.MasterConfig.ListenAddress)
-	if err != nil {
-		panic(err)
-	}
-	logger.Info("Master server listening on", config.Cfg.MasterConfig.ListenAddress)
-
+	// Initialize RPC clients
 	rpcClient, err := rpc.NewClient(config.Cfg.DaemonRpc)
 	if err != nil {
-		panic(err)
+		logger.Fatal("Failed to create daemon RPC client:", err)
 	}
 	DaemonRpc = daemon.NewClient(rpcClient)
 	logger.Info("Using daemon RPC " + config.Cfg.DaemonRpc)
 
-	go StartApiServer()
-	go StatsServer()
+	walletClient, err := rpc.NewClient(config.Cfg.MasterConfig.WalletRpc)
+	if err != nil {
+		logger.Fatal("Failed to create wallet RPC client:", err)
+	}
+	WalletRpc = wallet.NewClient(walletClient)
+	logger.Info("Using wallet RPC " + config.Cfg.MasterConfig.WalletRpc)
 
 	go Updater()
+	go StartApiServer()
+	
+	// Start stratum server in main thread since it has the accept loop
+	startStratum()
+}
 
+func startStratum() {
+	srv, err := net.Listen("tcp", config.Cfg.MasterConfig.ListenAddress)
+	if err != nil {
+		logger.Fatal("Failed to start stratum server:", err)
+	}
+	logger.Info("Master server listening on", config.Cfg.MasterConfig.ListenAddress)
+
+	// Start stats server
+	go StatsServer()
+
+	// Accept slave connections
 	for {
 		conn, err := srv.Accept()
 		if err != nil {
-			logger.Error(err)
+			logger.Error("Failed to accept connection:", err)
+			continue
 		}
 		go HandleSlave(conn)
 	}
 }
 
-func DatabaseCleanup() {
-	logger.Info("Starting database cleanup")
-
-	var sharesRemoved = 0
-	var sharesKept = 0
-
-	err := DB.Update(func(tx *bolt.Tx) error {
-		buck := tx.Bucket(database.SHARES)
-
-		cursor := buck.Cursor()
-
-		for k, v := cursor.First(); k != nil; k, v = cursor.Next() {
-			sh := database.Share{}
-
-			err := sh.Deserialize(v)
-
-			if err != nil {
-				logger.Warn("error reading share:", err)
-				buck.Delete(k)
-				sharesRemoved++
-				continue
-			}
-
-			// delete outdated shares
-			if sh.Time+GetPplnsWindow() < util.Time() {
-				buck.Delete(k)
-				sharesRemoved++
-				continue
-			}
-
-			sharesKept++
-		}
-
-		return nil
-	})
-	if err != nil {
-		logger.Error(err)
-	}
-
-	logger.Info("Database cleanup OK,", sharesRemoved, "outdated shares removed,", sharesKept, "mantained")
-}
-
+// ✅ PURE SQLITE SHARE SUBMISSION
 func OnShareFound(wallet string, diff uint64, numShares uint32) {
-	logger.Info("Wallet", wallet, "found", numShares, "shares with diff", float64(diff/100)/10, "k HR:", Get5mHashrate(wallet))
+	logger.Info("Share found - wallet:", wallet, "diff:", diff, "numShares:", numShares)
+	
 	if !address.IsAddressValid(wallet) {
-		logger.Warn("Wallet", wallet, "is not valid. Replacing it with fee address.")
+		logger.Warn("Invalid wallet address, using fee address")
 		wallet = config.Cfg.FeeAddress
 	}
 	
-	Stats.Lock()
-	
-	// NEW: Try to get the worker ID that was stored by the handler
-	// We'll use "legacy" as default since the original protocol doesn't have worker IDs
-	workerID := "legacy"
-	
-	// Add shares with worker information
+	// Submit shares to SQLite ledger
 	for i := uint32(0); i < numShares; i++ {
-		Stats.Shares = append(Stats.Shares, StatsShare{
-			Count:    1,
-			Wallet:   wallet,
-			WorkerID: workerID, // NEW: Include worker ID
-			Diff:     diff,
-			Time:     util.Time(),
-		})
-	}
-	
-	Stats.Cleanup()
-	Stats.Unlock()
-	
-	DB.Update(func(tx *bolt.Tx) error {
-		buck := tx.Bucket(database.SHARES)
-
-		shareId, _ := buck.NextSequence()
-
-		shareData := database.Share{
-			Wallet:   wallet,
-			WorkerID: workerID, // NEW: Store worker ID in database
-			Diff:     diff,
-			Time:     util.Time(),
+		share := ledger.Share{
+			BlockHeight: 0, // Will be set when block is found
+			MinerAddr:   wallet,
+			WorkerID:    "unknown", // TODO: Get from handler context
+			Difficulty:  diff,
+			Timestamp:   time.Now().Unix(),
 		}
-		buck.Put(util.Itob(shareId), shareData.Serialize())
-		return nil
-	})
+		
+		err := Ledger.AddShare(share)
+		if err != nil {
+			logger.Error("Failed to add share:", err)
+		}
+	}
 }
+
+// ✅ PURE SQLITE SHARE SUBMISSION - NO BOLT GARBAGE!
+func SubmitShare(nonce uint64, addr string, worker string, diff uint64) {
+	logger.Debug("📋 Submitting share via pure SQLite ledger")
+
+	// Create share record
+	share := ledger.Share{
+		BlockHeight: 0, // Will be set when block is found
+		MinerAddr:   addr,
+		WorkerID:    worker,
+		Difficulty:  diff,
+		Timestamp:   time.Now().Unix(),
+	}
+
+	// Submit to SQLite ledger
+	err := Ledger.AddShare(share)
+	if err != nil {
+		logger.Error("Failed to add share to ledger:", err)
+		return
+	}
+
+	logger.Debug("✅ Share added to SQLite ledger")
+}
+
+// ✅ PURE SQLITE BLOCK FOUND HANDLER
+func BlockFound(nonce uint64, addr string, hash string, height uint64, reward uint64) {
+	logger.Info("🎉 BLOCK FOUND! Height:", height, "Reward:", float64(reward)/100000000, "SAL")
+
+	// Create block record in SQLite
+	block := ledger.BlockFound{
+		Height:      height,
+		Hash:        hash,
+		RewardTotal: reward,
+		Timestamp:   time.Now().Unix(),
+		FoundAt:     time.Now().Unix(),
+		Status:      "pending",
+	}
+
+	err := Ledger.CreateBlock(block)
+	if err != nil {
+		logger.Error("Failed to record block in ledger:", err)
+		return
+	}
+
+	logger.Info("✅ Block recorded in SQLite ledger")
+}
+
+// GetPplnsWindow is defined in pplns_diff.go
 
 // Important: Stats must be locked
 func GetEstPendingBalance(addr string) float64 {
-
 	var totHashes float64
 	var minerHashes float64
-
-	/*SharesMut.RLock()
-	UpdateShares()
-
-	for _, v := range Shares {
-		totHashes += float64(v.Diff)
-		if v.Wallet == addr {
-			minerHashes += float64(v.Diff)
-		}
-	}
-	SharesMut.RUnlock()*/
 
 	MasterInfo.RLock()
 	reward := float64(MasterInfo.BlockReward) / math.Pow10(config.Cfg.Atomic)
@@ -217,3 +196,4 @@ func GetEstPendingBalance(addr string) float64 {
 
 	return balance
 }
+

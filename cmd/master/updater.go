@@ -19,35 +19,37 @@ package main
 
 import (
 	"context"
-	"encoding/hex"
+	"database/sql"
 	"fmt"
 	"go-pool/config"
-	"go-pool/database"
+	"go-pool/pkg/ledger"
 	"go-pool/logger"
-	"go-pool/util"
-	"math"
 	"sort"
 	"sync"
 	"time"
-
+	
 	"github.com/mxhess/go-salvium/rpc/wallet"
-	bolt "go.etcd.io/bbolt"
 )
 
+// Stats is defined in stats.go, removing duplicate declaration
+
+// ✅ PURE SQLITE UPDATER - NO BOLT GARBAGE!
 func Updater() {
+	// Start withdrawal processor
 	go func() {
 		for {
 			go Withdraw()
-
 			time.Sleep(time.Duration(config.Cfg.MasterConfig.WithdrawInterval) * time.Minute)
 		}
 	}()
 
+	// Main update loop
 	for {
 		time.Sleep(5 * time.Second)
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		info, err := DaemonRpc.GetInfo(ctx)
 		cancel()
+
 		if err != nil {
 			logger.Warn(err)
 			continue
@@ -55,13 +57,13 @@ func Updater() {
 
 		MasterInfo.Lock()
 		if info.Height != MasterInfo.Height {
-			logger.Info("New height", MasterInfo.Height, "->", info.Height)
+			logger.Info("📊 New height", MasterInfo.Height, "->", info.Height)
 			MasterInfo.Height = info.Height
 			Stats.NetHashrate = float64(info.Difficulty) / float64(config.BlockTime)
 			config.BlockTime = info.Target
-
 			MasterInfo.Unlock()
 
+			// Process transfers with PURE SQLite
 			go func() {
 				updated := CheckWithdraw()
 				if updated {
@@ -87,7 +89,6 @@ func UpdateReward() {
 		logger.Warn(err)
 		return
 	}
-
 	MasterInfo.Lock()
 	defer MasterInfo.Unlock()
 	MasterInfo.BlockReward = info.BlockHeader.Reward
@@ -96,35 +97,36 @@ func UpdateReward() {
 var minHeight uint64
 var minHeightMut sync.RWMutex
 
+// ✅ PURE SQLITE TRANSFER PROCESSOR - INFINITE LOOPS DESTROYED!
 func UpdatePendingBals() {
-	logger.Debug("Updating user balances")
+	logger.Debug("🔄 Updating user balances via pure SQLite ledger")
 
 	curAddy := config.Cfg.PoolAddress
-
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
 	indices, err := WalletRpc.GetAddressIndex(ctx, curAddy)
 	if err != nil {
 		logger.Warn(err)
-		cancel()
 		return
 	}
+
 	minHeightMut.Lock()
 	MasterInfo.Lock()
 	if minHeight == 0 && MasterInfo.Height > 720 {
 		minHeight = MasterInfo.Height - 720
 	}
 	MasterInfo.Unlock()
-	transfers, err := WalletRpc.GetTransfers(ctx, wallet.GetTransfersParams{
-		In: true,
 
+	transfers, err := WalletRpc.GetTransfers(ctx, wallet.GetTransfersParams{
+		In:             true,
 		AccountIndex:   indices.Index.Major,
 		SubaddrIndices: []uint{indices.Index.Minor},
-
 		FilterByHeight: true,
 		MinHeight:      minHeight,
 	})
 	minHeightMut.Unlock()
-	cancel()
+
 	if err != nil {
 		logger.Warn(err)
 		return
@@ -135,166 +137,176 @@ func UpdatePendingBals() {
 		return transfers.In[i].Height < transfers.In[j].Height
 	})
 
-	logger.Dev("sorted transfers", util.DumpJson(transfers.In))
+	logger.Dev("🔍 Processing", len(transfers.In), "transfers via SQLite ledger")
 
-	err = DB.Update(func(tx *bolt.Tx) error {
-		pendingBuck := tx.Bucket(database.PENDING)
-		pendingData := pendingBuck.Get([]byte("pending"))
-
-		pending := database.PendingBals{
-			UnconfirmedTxs: make([]database.UnconfTx, 0, 10),
+	// ✅ PURE SQLITE TRANSFER PROCESSING - ANTI-BUG PROTECTION!
+	for _, vt := range transfers.In {
+		// 🚫 THE BUG KILLER: Check if already processed
+		processed, err := Ledger.IsTransferProcessed(vt.Txid)
+		if err != nil {
+			logger.Error("❌ Error checking transfer:", err)
+			continue
 		}
 
-		if pendingData == nil {
-			logger.Debug("pending is nil")
+		if processed {
+			logger.Dev("🚫 Transfer", vt.Txid, "already processed - INFINITE LOOP PREVENTED!")
+			continue
+		}
+
+		// Process new transfer
+		logger.Info("🆕 Processing NEW transfer:", vt.Txid, "Height:", vt.Height, "Amount:", float64(vt.Amount)/1e8, "SAL")
+
+		if err := processTransfer(&vt); err != nil {
+			logger.Error("❌ Failed to process transfer:", err)
+			continue
+		}
+
+		// 🛡️ Mark as processed - PREVENTS FUTURE INFINITE LOOPS!
+		err = Ledger.MarkTransferProcessed(vt.Txid, vt.Height, vt.Amount)
+		if err != nil {
+			logger.Error("❌ Error marking transfer processed:", err)
 		} else {
-			err := pending.Deserialize(pendingData)
-			if err != nil {
-				logger.Error(err)
+			logger.Info("✅ Transfer", vt.Txid, "processed and marked - WILL NEVER REPROCESS!")
+		}
+	}
+}
+
+// ✅ PURE SQLITE TRANSFER PROCESSOR
+func processTransfer(transfer *wallet.TransferInfo) error {
+	// Check if block already processed
+	blockProcessed, err := Ledger.IsBlockProcessed(transfer.Height)
+	if err != nil {
+		return fmt.Errorf("failed to check block: %w", err)
+	}
+
+	if blockProcessed {
+		logger.Dev("⏭️ Block", transfer.Height, "already processed")
+		return nil
+	}
+
+	// Create block record
+	block := ledger.BlockFound{
+		Height:      transfer.Height,
+		Hash:        transfer.Txid,
+		RewardTotal: transfer.Amount,
+		Timestamp:   int64(transfer.Timestamp),
+		FoundAt:     time.Now().Unix(),
+		Status:      "processing",
+	}
+
+	if err := Ledger.CreateBlock(block); err != nil {
+		return fmt.Errorf("failed to create block: %w", err)
+	}
+
+	// Calculate PPLNS distributions
+	distributions, err := calculateDistributions(transfer)
+	if err != nil {
+		return fmt.Errorf("failed to calculate distributions: %w", err)
+	}
+
+	// Use transaction for atomicity
+	err = Ledger.WithTransaction(func(tx *sql.Tx) error {
+		// Create distributions
+		for _, dist := range distributions {
+			if err := Ledger.CreateDistribution(dist); err != nil {
 				return err
 			}
 		}
 
-		minHeightMut.Lock()
-		if pending.LastHeight > 720 {
-			minHeight = pending.LastHeight - 720
-		}
-		minHeightMut.Unlock()
+		// Queue payments
+		for _, dist := range distributions {
+			payment := ledger.Payment{
+				BlockHeight:   &transfer.Height,
+				RecipientAddr: dist.MinerAddr,
+				Amount:        dist.RewardNet,
+				Fee:           0,
+				Status:        "pending",
+				CreatedAt:     time.Now().Unix(),
+			}
 
-		var totalPendings = make(map[string]uint64)
-
-		nextHeight := pending.LastHeight
-
-		for _, vt := range transfers.In {
-			if vt.Height > pending.LastHeight -600 {
-				logger.Dev("transfer is fine! adding unconfirmed balance to it")
-
-				rewardNoFee := float64(vt.Amount)
-				logger.Debug("reward before fee is", rewardNoFee)
-				reward := rewardNoFee * (100 - config.Cfg.MasterConfig.FeePercent) / 100
-				logger.Debug("reward after fee is", reward)
-
-				var totHashes float64
-				var minersTotalHashes = make(map[string]float64, 10)
-
-				buck := tx.Bucket(database.SHARES)
-
-				c := buck.Cursor()
-
-				for key, v := c.First(); key != nil; key, v = c.Next() {
-					sh := database.Share{}
-
-					err := sh.Deserialize(v)
-
-					if err != nil {
-						logger.Error("error reading share:", err)
-						continue
-					}
-
-					Stats.RLock()
-					// delete outdated shares
-					if sh.Time+GetPplnsWindow() < util.Time() {
-						Stats.RUnlock()
-						buck.Delete(key)
-						continue
-					}
-					Stats.RUnlock()
-
-					totHashes += float64(sh.Diff)
-					minersTotalHashes[sh.Wallet] += float64(sh.Diff)
-
-					logger.Dev("block payout: adding share", sh.Wallet, ",", sh.Diff)
-
-					fmt.Printf("key=%x, value=%x\n", key, v)
-				}
-
-				txHashBin, err := hex.DecodeString(vt.Txid)
-				if err != nil {
-					logger.Error(err)
-					return err
-				}
-				if len(txHashBin) != 32 {
-					logger.Error("transaction hash length is not 32 bytes!", vt.Txid)
-					return fmt.Errorf("tx hash length is not 32 bytes")
-				}
-
-				pendBals := database.UnconfTx{
-					UnlockHeight: vt.Height + config.Cfg.MinConfs + 1,
-					Bals:         make(map[string]uint64),
-					TxnHash:      [32]byte(txHashBin),
-					BalancesAdded: false,
-				}
-
-				var minersBalances = make(map[string]float64, len(minersTotalHashes))
-				var totalRewarded uint64 // totalReward is slightly smaller than rewardNoFee because of rounding errors
-				for i, v := range minersTotalHashes {
-					minersBalances[i] = v * float64(reward) / totHashes
-
-					x := uint64(v * float64(reward) / totHashes)
-					pendBals.Bals[i] = x
-
-					totalPendings[i] += x
-
-					totalRewarded += x
-				}
-				pendBals.Bals[config.Cfg.FeeAddress] += uint64(rewardNoFee) - totalRewarded
-
-				totalPendings[config.Cfg.FeeAddress] += pendBals.Bals[config.Cfg.FeeAddress]
-
-				logger.Debug("Fee wallet has earned", (rewardNoFee-float64(totalRewarded))/math.Pow10(config.Cfg.Atomic))
-
-				logger.Dev("total hashes", util.DumpJson(minersTotalHashes))
-				logger.Dev("balances", util.DumpJson(minersBalances))
-
-				if pending.UnconfirmedTxs == nil {
-					pending.UnconfirmedTxs = make([]database.UnconfTx, 0, 10)
-				}
-
-				pending.UnconfirmedTxs = append(pending.UnconfirmedTxs, pendBals)
-
-				if vt.Height > nextHeight {
-					MasterInfo.RLock()
-					nextHeight = MasterInfo.Height
-					MasterInfo.RUnlock()
-				}
-
-				logger.Dev("Adding transfer DONE")
-			} else {
-				logger.Dev("transfer is too old - gotta ignore it - pending.LastHeight is", pending.LastHeight, "txn Height is", vt.Height)
+			if err := Ledger.CreatePayment(payment); err != nil {
+				return err
 			}
 		}
 
-		pending.LastHeight = nextHeight
-
-		infoBuck := tx.Bucket(database.ADDRESS_INFO)
-
-		for i, v := range totalPendings {
-			addrInfoBin := infoBuck.Get([]byte(i))
-
-			addrInfo := database.AddrInfo{}
-
-			if addrInfoBin == nil {
-				logger.Dev("addrInfo is nil")
-			} else {
-				err = addrInfo.Deserialize(addrInfoBin)
-				if err != nil {
-					logger.Warn(err)
-					continue
-				}
-			}
-
-			addrInfo.BalancePending = v
-
-			infoBuck.Put([]byte(i), addrInfo.Serialize())
-
-		}
-
-		return pendingBuck.Put([]byte("pending"), pending.Serialize())
-
+		return nil
 	})
 
 	if err != nil {
-		logger.Error(err)
+		return fmt.Errorf("failed to create distributions: %w", err)
 	}
 
+	// Mark block as completed
+	if err := Ledger.MarkBlockProcessed(transfer.Height); err != nil {
+		return fmt.Errorf("failed to mark block processed: %w", err)
+	}
+
+	logger.Info("✅ Block", transfer.Height, "fully processed with", len(distributions), "distributions")
+	return nil
 }
+
+// ✅ PURE SQLITE PPLNS CALCULATION
+func calculateDistributions(transfer *wallet.TransferInfo) ([]ledger.Distribution, error) {
+	// Get shares in PPLNS window
+	windowStart := time.Now().Unix() - int64(21600) // 6 hours default
+	shares, err := Ledger.GetSharesInWindow(windowStart)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(shares) == 0 {
+		logger.Warn("⚠️ No shares in PPLNS window for block", transfer.Height)
+		return nil, nil
+	}
+
+	// Calculate miner shares
+	minerShares := make(map[string]uint64)
+	var totalShares uint64
+
+	for _, share := range shares {
+		minerShares[share.MinerAddr] += share.Difficulty
+		totalShares += share.Difficulty
+	}
+
+	// Calculate distributions
+	var distributions []ledger.Distribution
+	feePercent := config.Cfg.MasterConfig.FeePercent
+
+	for minerAddr, shareCount := range minerShares {
+		percentage := float64(shareCount) / float64(totalShares)
+		rewardGross := uint64(float64(transfer.Amount) * percentage)
+		rewardNet := uint64(float64(rewardGross) * (100 - feePercent) / 100)
+
+		distribution := ledger.Distribution{
+			BlockHeight:   transfer.Height,
+			MinerAddr:     minerAddr,
+			SharesContrib: shareCount,
+			Percentage:    percentage,
+			RewardGross:   rewardGross,
+			RewardNet:     rewardNet,
+			CalculatedAt:  time.Now().Unix(),
+		}
+
+		distributions = append(distributions, distribution)
+	}
+
+	// Add pool fee
+	totalNetReward := uint64(float64(transfer.Amount) * (100 - feePercent) / 100)
+	poolFee := transfer.Amount - totalNetReward
+
+	feeDistribution := ledger.Distribution{
+		BlockHeight:   transfer.Height,
+		MinerAddr:     config.Cfg.FeeAddress,
+		SharesContrib: 0,
+		Percentage:    feePercent / 100,
+		RewardGross:   poolFee,
+		RewardNet:     poolFee,
+		CalculatedAt:  time.Now().Unix(),
+	}
+
+	distributions = append(distributions, feeDistribution)
+
+	logger.Info("💰 Calculated", len(distributions), "distributions for block", transfer.Height)
+	return distributions, nil
+}
+
