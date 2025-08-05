@@ -94,6 +94,7 @@ type UnconfTx struct {
 	UnlockHeight uint64
 	TxnHash      [32]byte
 	Bals         map[string]uint64
+	BalancesAdded  bool
 }
 type PendingBals struct {
 	LastHeight uint64
@@ -114,6 +115,7 @@ func (x *UnconfTx) Serialize() []byte {
 		s.AddString(i)
 		s.AddUvarint(v)
 	}
+	s.AddBool(x.BalancesAdded)
 
 	return s.Data
 }
@@ -134,6 +136,7 @@ func (x *UnconfTx) Deserialize(data []byte) ([]byte, error) {
 	for i := 0; i < balsLen; i++ {
 		x.Bals[d.ReadString()] = d.ReadUvarint()
 	}
+	x.BalancesAdded = d.ReadBool()
 
 	return d.Data, d.Error
 }

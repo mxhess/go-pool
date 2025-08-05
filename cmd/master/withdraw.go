@@ -108,28 +108,35 @@ func CheckWithdraw() bool {
 				return nil
 			}
 
-			infoBuck := tx.Bucket(database.ADDRESS_INFO)
-			for i, v := range pending.UnconfirmedTxs[0].Bals {
-				wallInfoBin := infoBuck.Get([]byte(i))
+			if !pending.UnconfirmedTxs[0].BalancesAdded {
+			    logger.Info("Adding confirmed block rewards to balances")
 
-				addrInfo := database.AddrInfo{}
+			    infoBuck := tx.Bucket(database.ADDRESS_INFO)
+			    for i, v := range pending.UnconfirmedTxs[0].Bals {
+			        wallInfoBin := infoBuck.Get([]byte(i))
 
-				if wallInfoBin == nil {
-					logger.Debug("wallInfoBin is nil")
-				} else {
-					err := addrInfo.Deserialize(wallInfoBin)
-					if err != nil {
-						logger.Error(err)
-						return err
-					}
-				}
+			        addrInfo := database.AddrInfo{}
+ 
+			        if wallInfoBin == nil {
+			            logger.Debug("wallInfoBin is nil")
+			        } else {
+			            err := addrInfo.Deserialize(wallInfoBin)
+			            if err != nil {
+			                logger.Error(err)
+			                return err
+			            }
+			        }
 
-				addrInfo.Balance += v
+			        addrInfo.Balance += v
+ 
+			        err = infoBuck.Put([]byte(i), addrInfo.Serialize())
+			        if err != nil {
+			            return err
+			        }
+			    }
 
-				err = infoBuck.Put([]byte(i), addrInfo.Serialize())
-				if err != nil {
-					return err
-				}
+			    // Mark this block as having its balances added
+			    pending.UnconfirmedTxs[0].BalancesAdded = true
 			}
 
 			if len(pending.UnconfirmedTxs) > 1 {

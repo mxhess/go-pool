@@ -166,7 +166,7 @@ func UpdatePendingBals() {
 		nextHeight := pending.LastHeight
 
 		for _, vt := range transfers.In {
-			if vt.Height >= pending.LastHeight {
+			if vt.Height > pending.LastHeight -600 {
 				logger.Dev("transfer is fine! adding unconfirmed balance to it")
 
 				rewardNoFee := float64(vt.Amount)
@@ -222,6 +222,7 @@ func UpdatePendingBals() {
 					UnlockHeight: vt.Height + config.Cfg.MinConfs + 1,
 					Bals:         make(map[string]uint64),
 					TxnHash:      [32]byte(txHashBin),
+					BalancesAdded: false,
 				}
 
 				var minersBalances = make(map[string]float64, len(minersTotalHashes))

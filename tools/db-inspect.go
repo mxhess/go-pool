@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"time"
 	"go-pool/database"
 	bolt "go.etcd.io/bbolt"
 )
@@ -44,25 +45,43 @@ func main() {
 }
 
 func showBucket(b *bolt.Bucket, bucketName string) error {
-	if bucketName == "ADDRESS_INFO" {
-		return b.ForEach(func(k, v []byte) error {
+	count := 0
+	
+	return b.ForEach(func(k, v []byte) error {
+		count++
+		
+		// Try to identify bucket by common key patterns
+		if len(k) > 50 && count <= 5 { // Likely ADDRESS_INFO (long address keys)
 			fmt.Printf("Address: %s\n", k)
 			addrInfo := database.AddrInfo{}
 			if err := addrInfo.Deserialize(v); err == nil {
 				fmt.Printf("  Balance: %d (%.8f SAL)\n", addrInfo.Balance, float64(addrInfo.Balance)/100000000)
 				fmt.Printf("  Paid: %d (%.8f SAL)\n", addrInfo.Paid, float64(addrInfo.Paid)/100000000)
+			} else {
+				fmt.Printf("  Raw data: %d bytes\n", len(v))
 			}
 			return nil
-		})
-	}
-	
-	// Generic bucket display
-	count := 0
-	return b.ForEach(func(k, v []byte) error {
-		count++
-		if count <= 10 {
-			fmt.Printf("  %x: %d bytes\n", k, len(v))
+		}
+		
+		if string(k) == "pending" { // PENDING bucket
+			fmt.Printf("Key: pending\n")
+			pending := database.PendingBals{}
+			if err := pending.Deserialize(v); err == nil {
+				fmt.Printf("  LastHeight: %d\n", pending.LastHeight)
+				fmt.Printf("  UnconfirmedTxs: %d\n", len(pending.UnconfirmedTxs))
+				for i, tx := range pending.UnconfirmedTxs {
+					fmt.Printf("    Tx %d: Height %d, Balances: %d addresses, BalancesAdded: %t\n", 
+						i, tx.UnlockHeight, len(tx.Bals), tx.BalancesAdded)
+				}
+			}
+			return nil
+		}
+		
+		// Generic display for other data
+		if count <= 3 {
+			fmt.Printf("  Key: %x, Value: %d bytes\n", k, len(v))
 		}
 		return nil
 	})
 }
+
