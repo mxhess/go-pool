@@ -38,7 +38,6 @@ import (
 	"github.com/mxhess/go-salvium/rpc/daemon"
 )
 
-
 // NEW: Structure to hold connection worker info
 type ConnectionWorkerInfo struct {
 	Address  string
@@ -49,21 +48,20 @@ type ConnectionWorkerInfo struct {
 var connectionWorkers = make(map[uint64]ConnectionWorkerInfo)
 var connectionWorkersMutex sync.RWMutex
 
-
 // Extract worker ID from miner connection parameters
 func extractWorkerID(login, pass, agent string) string {
 	// Method 1: Check if password contains worker ID
 	if pass != "" && pass != "x" && pass != "X" {
 		return pass
 	}
-	
+
 	// Method 2: Check for address.workerID+difficulty format
 	if strings.Contains(login, ".") {
 		// Find the part after the dot
 		dotParts := strings.Split(login, ".")
 		if len(dotParts) >= 2 && len(dotParts[1]) > 0 {
 			workerPart := dotParts[1]
-			
+
 			// Check if there's a + for difficulty
 			if strings.Contains(workerPart, "+") {
 				// Split worker and difficulty: "workername+1944496"
@@ -77,7 +75,7 @@ func extractWorkerID(login, pass, agent string) string {
 			}
 		}
 	}
-	
+
 	// Method 3: Extract from XMRig rig-id in user agent
 	if strings.Contains(agent, "rig-id/") {
 		rigParts := strings.Split(agent, "rig-id/")
@@ -88,7 +86,7 @@ func extractWorkerID(login, pass, agent string) string {
 			}
 		}
 	}
-	
+
 	// Method 4: Default worker name
 	return "default"
 }
@@ -128,16 +126,35 @@ func HandleConnection(conn *stratum.Connection) {
 		conn.Nicehash = true
 	}
 
-	splitLogin := strings.Split(reqParams.Login, "+")
-	connAddress := splitLogin[0]
+	// Parse login format: address[.workername][+difficulty]
+	var connAddress string
+	var requestedDiff uint64
 
-	// MODIFIED: Handle address.workerID format in login
-	addressParts := strings.Split(connAddress, ".")
-	if len(addressParts) >= 2 && address.IsAddressValid(addressParts[0]) {
-		connAddress = addressParts[0] // Use the address part only
+	// First, check if there's a + for difficulty
+	plusIndex := strings.LastIndex(reqParams.Login, "+")
+	loginWithoutDiff := reqParams.Login
+	if plusIndex != -1 {
+		// Extract difficulty
+		diffStr := reqParams.Login[plusIndex+1:]
+		if diffVal, err := strconv.ParseUint(diffStr, 10, 64); err == nil {
+			requestedDiff = diffVal
+		} else {
+			logger.Debug("Failed to parse difficulty:", err)
+		}
+		// Remove the +difficulty part
+		loginWithoutDiff = reqParams.Login[:plusIndex]
 	}
 
-	if len(reqParams.Login) < 10 || !address.IsAddressValid(connAddress) {
+	// Now handle address.workername format
+	addressParts := strings.Split(loginWithoutDiff, ".")
+	if len(addressParts) >= 2 && address.IsAddressValid(addressParts[0]) {
+		connAddress = addressParts[0] // Use the address part only
+	} else {
+		connAddress = loginWithoutDiff
+	}
+
+	// Validate address
+	if len(connAddress) < 10 || !address.IsAddressValid(connAddress) {
 		logger.Warn("Address", connAddress, "is not valid")
 		conn.Send(map[string]any{
 			"id":      req.ID,
@@ -161,7 +178,7 @@ func HandleConnection(conn *stratum.Connection) {
 		WorkerID: workerID,
 	}
 	connectionWorkersMutex.Unlock()
-	
+
 	// Cleanup function for when connection ends
 	defer func() {
 		connectionWorkersMutex.Lock()
@@ -169,22 +186,19 @@ func HandleConnection(conn *stratum.Connection) {
 		connectionWorkersMutex.Unlock()
 	}()
 
-	if len(splitLogin) > 1 {
-		diffVal, err := strconv.ParseUint(splitLogin[1], 10, 64)
-		if err != nil {
-			logger.Debug(err)
-		} else {
-			CurInfo.RLock()
-			if diffVal < config.Cfg.SlaveConfig.MinDiff {
-				diffVal = config.Cfg.SlaveConfig.MinDiff
-			} else if diffVal > CurInfo.Difficulty/2 {
-				diffVal = CurInfo.Difficulty / 2
-			}
-			CurInfo.RUnlock()
-			conn.CurrentJob.Diff = diffVal
+	// Apply difficulty constraints
+	if requestedDiff > 0 {
+		CurInfo.RLock()
+		if requestedDiff < config.Cfg.SlaveConfig.MinDiff {
+			requestedDiff = config.Cfg.SlaveConfig.MinDiff
+		} else if requestedDiff > CurInfo.Difficulty/2 {
+			requestedDiff = CurInfo.Difficulty / 2
 		}
+		CurInfo.RUnlock()
+		conn.CurrentJob.Diff = requestedDiff
 	}
 
+	// Set default difficulty if none specified
 	if conn.CurrentJob.Diff == 0 {
 		conn.CurrentJob.Diff = config.Cfg.SlaveConfig.MinDiff * 2
 	}
@@ -634,7 +648,6 @@ func HandleConnection(conn *stratum.Connection) {
 
 		conn.Score += 1
 
-
 		logger.Info("Share:", connAddress, "diff", theJob.Diff)
 
 		if util.RandomFloat() > float32(1-(config.Cfg.SlaveConfig.SlaveFee/100)) {
@@ -770,3 +783,4 @@ func GetJob(jobDiff uint64) (j *template.Job, blocktemplateBlob []byte, err erro
 
 	return
 }
+

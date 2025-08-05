@@ -19,12 +19,12 @@ type BlockFound struct {
 
 // Share represents a single share submission
 type Share struct {
-	ID          uint64 `db:"id" json:"id"`
-	BlockHeight uint64 `db:"block_height" json:"block_height"`
-	MinerAddr   string `db:"miner_address" json:"miner_address"`
-	WorkerID    string `db:"worker_id" json:"worker_id"`
-	Difficulty  uint64 `db:"difficulty" json:"difficulty"`
-	Timestamp   int64  `db:"timestamp" json:"timestamp"`
+    ID          uint64  `db:"id" json:"id"`
+    BlockHeight *uint64 `db:"block_height" json:"block_height,omitempty"` // Made nullable with pointer
+    MinerAddr   string  `db:"miner_address" json:"miner_address"`
+    WorkerID    string  `db:"worker_id" json:"worker_id"`
+    Difficulty  uint64  `db:"difficulty" json:"difficulty"`
+    Timestamp   int64   `db:"timestamp" json:"timestamp"`
 }
 
 // Distribution represents calculated reward distribution for a block
@@ -232,4 +232,24 @@ type BlockDetail struct {
 	Status          string  `json:"status"`
 	BlockLuck       float64 `json:"block_luck"`
 }
+
+
+// Withdrawal represents a completed withdrawal transaction
+type Withdrawal struct {
+	TxID      string
+	Amount    uint64
+	Timestamp int64
+}
+
+// BlockInfo is a simplified block structure for API responses
+type BlockInfo struct {
+	Height      uint64
+	Hash        string
+	RewardTotal uint64
+	Timestamp   int64
+	Status      string
+}
+
+// MinerBalance is an alias for Balance for API compatibility
+type MinerBalance = Balance
 

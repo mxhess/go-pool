@@ -91,7 +91,7 @@ func startStratum() {
 	}
 	logger.Info("Master server listening on", config.Cfg.MasterConfig.ListenAddress)
 
-	// Start stats server
+	// Start stats server (already exists in stats.go)
 	go StatsServer()
 
 	// Accept slave connections
@@ -105,21 +105,35 @@ func startStratum() {
 	}
 }
 
-// ✅ PURE SQLITE SHARE SUBMISSION
-func OnShareFound(wallet string, diff uint64, numShares uint32) {
-	logger.Info("Share found - wallet:", wallet, "diff:", diff, "numShares:", numShares)
+// ✅ PURE SQLITE SHARE SUBMISSION WITH WORKER ID
+func OnShareFound(wallet string, diff uint64, numShares uint32, workerID string) {
+	logger.Info("Share found - wallet:", wallet, "worker:", workerID, "diff:", diff, "numShares:", numShares)
 	
 	if !address.IsAddressValid(wallet) {
 		logger.Warn("Invalid wallet address, using fee address")
 		wallet = config.Cfg.FeeAddress
 	}
 	
+	// Update in-memory stats for immediate display
+	Stats.Lock()
+	for i := uint32(0); i < numShares; i++ {
+		Stats.Shares = append(Stats.Shares, StatsShare{
+			Count:    1,
+			Wallet:   wallet,
+			WorkerID: workerID,
+			Diff:     diff,
+			Time:     uint64(time.Now().Unix()),
+		})
+	}
+	Stats.Cleanup()
+	Stats.Unlock()
+	
 	// Submit shares to SQLite ledger
 	for i := uint32(0); i < numShares; i++ {
 		share := ledger.Share{
-			BlockHeight: 0, // Will be set when block is found
+			// BlockHeight is nil by default (pointer)
 			MinerAddr:   wallet,
-			WorkerID:    "unknown", // TODO: Get from handler context
+			WorkerID:    workerID,
 			Difficulty:  diff,
 			Timestamp:   time.Now().Unix(),
 		}
@@ -137,7 +151,7 @@ func SubmitShare(nonce uint64, addr string, worker string, diff uint64) {
 
 	// Create share record
 	share := ledger.Share{
-		BlockHeight: 0, // Will be set when block is found
+		// BlockHeight is nil by default (pointer)
 		MinerAddr:   addr,
 		WorkerID:    worker,
 		Difficulty:  diff,

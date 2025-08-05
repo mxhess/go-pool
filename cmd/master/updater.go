@@ -96,6 +96,7 @@ func UpdateReward() {
 
 var minHeight uint64
 var minHeightMut sync.RWMutex
+var lastProcessedHeight uint64 // Track the highest processed transfer
 
 // ✅ PURE SQLITE TRANSFER PROCESSOR - INFINITE LOOPS DESTROYED!
 func UpdatePendingBals() {
@@ -112,12 +113,11 @@ func UpdatePendingBals() {
 	}
 
 	minHeightMut.Lock()
-	MasterInfo.Lock()
-	if minHeight == 0 && MasterInfo.Height > 720 {
-		minHeight = MasterInfo.Height - 720
+	// Update minHeight if we've processed newer transfers
+	if lastProcessedHeight > minHeight {
+		minHeight = lastProcessedHeight + 1
 	}
-	MasterInfo.Unlock()
-
+	
 	transfers, err := WalletRpc.GetTransfers(ctx, wallet.GetTransfersParams{
 		In:             true,
 		AccountIndex:   indices.Index.Major,
@@ -137,7 +137,9 @@ func UpdatePendingBals() {
 		return transfers.In[i].Height < transfers.In[j].Height
 	})
 
-	logger.Dev("🔍 Processing", len(transfers.In), "transfers via SQLite ledger")
+	if len(transfers.In) > 0 {
+		logger.Dev("🔍 Processing", len(transfers.In), "transfers via SQLite ledger")
+	}
 
 	// ✅ PURE SQLITE TRANSFER PROCESSING - ANTI-BUG PROTECTION!
 	for _, vt := range transfers.In {
@@ -149,7 +151,7 @@ func UpdatePendingBals() {
 		}
 
 		if processed {
-			logger.Dev("🚫 Transfer", vt.Txid, "already processed - INFINITE LOOP PREVENTED!")
+			// Don't log at DEV level for known processed transfers
 			continue
 		}
 
@@ -167,6 +169,13 @@ func UpdatePendingBals() {
 			logger.Error("❌ Error marking transfer processed:", err)
 		} else {
 			logger.Info("✅ Transfer", vt.Txid, "processed and marked - WILL NEVER REPROCESS!")
+			
+			// Update lastProcessedHeight
+			minHeightMut.Lock()
+			if vt.Height > lastProcessedHeight {
+				lastProcessedHeight = vt.Height
+			}
+			minHeightMut.Unlock()
 		}
 	}
 }

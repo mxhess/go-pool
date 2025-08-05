@@ -274,6 +274,13 @@ func UpdateWorkerActivity(wallet string, workerID string) {
         Stats.KnownWorkers[wallet][workerID] = util.Time()
 }
 
+func sanitizeFloat(val float64) float64 {
+	if math.IsNaN(val) || math.IsInf(val, 0) {
+		return 0
+	}
+	return val
+}
+
 // Removes shares older than 15 minutes. Also updates the Pool Hashrate in stats, and saves the stats.
 // Stats must be locked.
 func (s *Statistics) Cleanup() {
@@ -324,6 +331,10 @@ func (s *Statistics) Cleanup() {
         s.Shares = shares2
         s.PoolHashrate = math.Round(totalHashes / (15 * 60))
 
+	// Sanitize float values to prevent +Inf/-Inf in JSON
+	s.PoolHashrate = sanitizeFloat(s.PoolHashrate)
+	s.NetHashrate = sanitizeFloat(s.NetHashrate)
+
         data, err := json.Marshal(s)
         if err != nil {
                 logger.Error(err)
@@ -342,4 +353,5 @@ func (s *Statistics) Cleanup() {
 
         os.WriteFile("stats.json", data, 0o600)
 }
+
 

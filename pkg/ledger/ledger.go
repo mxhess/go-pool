@@ -1,5 +1,6 @@
 
 
+
 package ledger
 
 import (
@@ -23,8 +24,8 @@ type LedgerDB struct {
 // NewLedgerDB creates a new mining pool ledger database
 func NewLedgerDB(dbPath string) (*LedgerDB, error) {
 	// Connection string with performance optimizations
-	connStr := fmt.Sprintf("file:%s?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=cache_size(-20000)&_pragma=temp_store(memory)", dbPath)
-	
+	connStr := fmt.Sprintf("file:%s?_pragma=foreign_keys(0)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=cache_size(-20000)&_pragma=temp_store(memory)", dbPath)
+
 	db, err := sql.Open("sqlite", connStr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
@@ -36,7 +37,7 @@ func NewLedgerDB(dbPath string) (*LedgerDB, error) {
 	db.SetConnMaxLifetime(5 * time.Minute)
 
 	ledger := &LedgerDB{db: db}
-	
+
 	// Test connection
 	if err := db.Ping(); err != nil {
 		return nil, fmt.Errorf("failed to ping database: %w", err)
@@ -112,7 +113,7 @@ func (l *LedgerDB) MarkTransferProcessed(txid string, height uint64, amount uint
 		INSERT OR IGNORE INTO processed_transfers (txid, height, amount, processed_at) 
 		VALUES (?, ?, ?, ?)`,
 		txid, height, amount, time.Now().Unix())
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to mark transfer processed: %w", err)
 	}
@@ -125,7 +126,7 @@ func (l *LedgerDB) IsBlockProcessed(height uint64) (bool, error) {
 	err := l.db.QueryRow(`
 		SELECT COUNT(*) FROM blocks_found 
 		WHERE height = ? AND status IN ('completed', 'orphaned')`, height).Scan(&count)
-	
+
 	if err != nil {
 		return false, fmt.Errorf("failed to check block: %w", err)
 	}
@@ -142,9 +143,9 @@ func (l *LedgerDB) CreateBlock(block BlockFound) error {
 		INSERT OR IGNORE INTO blocks_found 
 		(height, hash, reward_total, timestamp, found_at, status) 
 		VALUES (?, ?, ?, ?, ?, ?)`,
-		block.Height, block.Hash, block.RewardTotal, 
+		block.Height, block.Hash, block.RewardTotal,
 		block.Timestamp, block.FoundAt, block.Status)
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to create block: %w", err)
 	}
@@ -159,7 +160,7 @@ func (l *LedgerDB) GetBlock(height uint64) (*BlockFound, error) {
 		FROM blocks_found WHERE height = ?`, height).Scan(
 		&block.Height, &block.Hash, &block.RewardTotal,
 		&block.Timestamp, &block.FoundAt, &block.ProcessedAt, &block.Status)
-	
+
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
@@ -176,7 +177,7 @@ func (l *LedgerDB) MarkBlockProcessed(height uint64) error {
 		UPDATE blocks_found 
 		SET processed_at = ?, status = 'completed' 
 		WHERE height = ?`, now, height)
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to mark block processed: %w", err)
 	}
@@ -193,9 +194,9 @@ func (l *LedgerDB) AddShare(share Share) error {
 		INSERT INTO shares 
 		(block_height, miner_address, worker_id, difficulty, timestamp) 
 		VALUES (?, ?, ?, ?, ?)`,
-		share.BlockHeight, share.MinerAddr, share.WorkerID, 
+		share.BlockHeight, share.MinerAddr, share.WorkerID,
 		share.Difficulty, share.Timestamp)
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to add share: %w", err)
 	}
@@ -209,7 +210,7 @@ func (l *LedgerDB) GetSharesInWindow(windowStart int64) ([]Share, error) {
 		FROM shares 
 		WHERE timestamp >= ?
 		ORDER BY timestamp DESC`, windowStart)
-	
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to get shares: %w", err)
 	}
@@ -218,7 +219,7 @@ func (l *LedgerDB) GetSharesInWindow(windowStart int64) ([]Share, error) {
 	var shares []Share
 	for rows.Next() {
 		var share Share
-		err := rows.Scan(&share.ID, &share.BlockHeight, &share.MinerAddr, 
+		err := rows.Scan(&share.ID, &share.BlockHeight, &share.MinerAddr,
 			&share.WorkerID, &share.Difficulty, &share.Timestamp)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan share: %w", err)
@@ -239,9 +240,9 @@ func (l *LedgerDB) CreateDistribution(dist Distribution) error {
 		(block_height, miner_address, shares_contributed, percentage, 
 		 reward_gross, reward_net, calculated_at) 
 		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		dist.BlockHeight, dist.MinerAddr, dist.SharesContrib, 
+		dist.BlockHeight, dist.MinerAddr, dist.SharesContrib,
 		dist.Percentage, dist.RewardGross, dist.RewardNet, dist.CalculatedAt)
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to create distribution: %w", err)
 	}
@@ -255,7 +256,7 @@ func (l *LedgerDB) GetDistributionsForBlock(height uint64) ([]Distribution, erro
 		       percentage, reward_gross, reward_net, calculated_at
 		FROM distributions 
 		WHERE block_height = ?`, height)
-	
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to get distributions: %w", err)
 	}
@@ -285,9 +286,9 @@ func (l *LedgerDB) CreatePayment(payment Payment) error {
 		INSERT INTO payments 
 		(block_height, recipient_address, amount, fee, status, created_at) 
 		VALUES (?, ?, ?, ?, ?, ?)`,
-		payment.BlockHeight, payment.RecipientAddr, payment.Amount, 
+		payment.BlockHeight, payment.RecipientAddr, payment.Amount,
 		payment.Fee, payment.Status, payment.CreatedAt)
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to create payment: %w", err)
 	}
@@ -302,7 +303,7 @@ func (l *LedgerDB) GetPendingPayments() ([]Payment, error) {
 		FROM payments 
 		WHERE status = 'pending'
 		ORDER BY created_at ASC`)
-	
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to get pending payments: %w", err)
 	}
@@ -326,24 +327,24 @@ func (l *LedgerDB) GetPendingPayments() ([]Payment, error) {
 func (l *LedgerDB) UpdatePaymentStatus(paymentID uint64, status string, txid *string) error {
 	var err error
 	now := time.Now().Unix()
-	
+
 	if status == "sent" && txid != nil {
 		_, err = l.db.Exec(`
 			UPDATE payments 
-			SET status = ?, txid = ?, sent_at = ?
-			WHERE id = ?`, status, *txid, now, paymentID)
+			SET status = ?, txid = ?, sent_at = ?, updated_at = ?
+			WHERE id = ?`, status, *txid, now, now, paymentID)
 	} else if status == "confirmed" {
 		_, err = l.db.Exec(`
 			UPDATE payments 
-			SET status = ?, confirmed_at = ?
-			WHERE id = ?`, status, now, paymentID)
+			SET status = ?, confirmed_at = ?, updated_at = ?
+			WHERE id = ?`, status, now, now, paymentID)
 	} else {
 		_, err = l.db.Exec(`
 			UPDATE payments 
-			SET status = ?
-			WHERE id = ?`, status, paymentID)
+			SET status = ?, updated_at = ?
+			WHERE id = ?`, status, now, paymentID)
 	}
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to update payment status: %w", err)
 	}
@@ -362,7 +363,7 @@ func (l *LedgerDB) GetBalance(minerAddr string) (*Balance, error) {
 		FROM balances WHERE miner_address = ?`, minerAddr).Scan(
 		&balance.MinerAddr, &balance.BalancePending, &balance.BalanceConfirmed,
 		&balance.TotalPaid, &balance.LastUpdated)
-	
+
 	if err != nil {
 		if err == sql.ErrNoRows {
 			// Return zero balance for new miner
@@ -383,24 +384,24 @@ func (l *LedgerDB) GetBalance(minerAddr string) (*Balance, error) {
 // STATISTICS AND REPORTING
 // =============================================================================
 
-// GetRecentBlocks retrieves recently found blocks
-func (l *LedgerDB) GetRecentBlocks(limit int) ([]BlockFound, error) {
+// GetRecentBlocks retrieves recently found blocks (returns BlockInfo for API)
+func (l *LedgerDB) GetRecentBlocks(limit int) ([]BlockInfo, error) {
 	rows, err := l.db.Query(`
-		SELECT height, hash, reward_total, timestamp, found_at, processed_at, status
+		SELECT height, hash, reward_total, timestamp, status
 		FROM blocks_found 
 		ORDER BY height DESC 
 		LIMIT ?`, limit)
-	
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to get recent blocks: %w", err)
 	}
 	defer rows.Close()
 
-	var blocks []BlockFound
+	var blocks []BlockInfo
 	for rows.Next() {
-		var block BlockFound
+		var block BlockInfo
 		err := rows.Scan(&block.Height, &block.Hash, &block.RewardTotal,
-			&block.Timestamp, &block.FoundAt, &block.ProcessedAt, &block.Status)
+			&block.Timestamp, &block.Status)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan block: %w", err)
 		}
@@ -428,5 +429,301 @@ func (l *LedgerDB) GetTopMiners(limit int) ([]TopMiner, error) {
 		miners = append(miners, miner)
 	}
 	return miners, nil
+}
+
+// =============================================================================
+// API SUPPORT METHODS
+// =============================================================================
+
+// GetMinerSharesInWindow gets all shares for a specific miner within a time window
+func (l *LedgerDB) GetMinerSharesInWindow(minerAddr string, startTime int64) ([]Share, error) {
+	rows, err := l.db.Query(`
+		SELECT id, block_height, miner_address, worker_id, difficulty, timestamp
+		FROM shares
+		WHERE miner_address = ? AND timestamp >= ?
+		ORDER BY timestamp DESC`, minerAddr, startTime)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to get miner shares: %w", err)
+	}
+	defer rows.Close()
+
+	var shares []Share
+	for rows.Next() {
+		var s Share
+		err := rows.Scan(&s.ID, &s.BlockHeight, &s.MinerAddr, &s.WorkerID, &s.Difficulty, &s.Timestamp)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan share: %w", err)
+		}
+		shares = append(shares, s)
+	}
+
+	return shares, rows.Err()
+}
+
+// GetActiveWorkers gets unique workers for a miner active since timestamp
+func (l *LedgerDB) GetActiveWorkers(minerAddr string, since int64) ([]string, error) {
+	rows, err := l.db.Query(`
+		SELECT DISTINCT worker_id
+		FROM shares
+		WHERE miner_address = ? AND timestamp >= ?`, minerAddr, since)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to get active workers: %w", err)
+	}
+	defer rows.Close()
+
+	var workers []string
+	for rows.Next() {
+		var worker string
+		if err := rows.Scan(&worker); err != nil {
+			return nil, fmt.Errorf("failed to scan worker: %w", err)
+		}
+		workers = append(workers, worker)
+	}
+
+	return workers, rows.Err()
+}
+
+// GetMinerWithdrawals gets recent withdrawals for a miner
+func (l *LedgerDB) GetMinerWithdrawals(minerAddr string, limit int) ([]Withdrawal, error) {
+	rows, err := l.db.Query(`
+		SELECT txid, amount, updated_at
+		FROM payments
+		WHERE recipient_address = ? AND status = 'sent' AND txid IS NOT NULL
+		ORDER BY updated_at DESC
+		LIMIT ?`, minerAddr, limit)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to get withdrawals: %w", err)
+	}
+	defer rows.Close()
+
+	var withdrawals []Withdrawal
+	for rows.Next() {
+		var w Withdrawal
+		var txid sql.NullString
+		var timestamp sql.NullInt64
+
+		err := rows.Scan(&txid, &w.Amount, &timestamp)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan withdrawal: %w", err)
+		}
+
+		if txid.Valid {
+			w.TxID = txid.String
+		}
+		if timestamp.Valid {
+			w.Timestamp = timestamp.Int64
+		}
+
+		withdrawals = append(withdrawals, w)
+	}
+
+	return withdrawals, rows.Err()
+}
+
+// GetActiveMinerCount gets count of unique miners active since timestamp
+func (l *LedgerDB) GetActiveMinerCount(since int64) (int, error) {
+	var count int
+	err := l.db.QueryRow(`
+		SELECT COUNT(DISTINCT miner_address)
+		FROM shares
+		WHERE timestamp >= ?`, since).Scan(&count)
+
+	if err != nil {
+		return 0, fmt.Errorf("failed to get active miner count: %w", err)
+	}
+	return count, nil
+}
+
+// GetActiveWorkerCount gets count of unique worker combinations active since timestamp
+func (l *LedgerDB) GetActiveWorkerCount(since int64) (int, error) {
+	var count int
+	err := l.db.QueryRow(`
+		SELECT COUNT(DISTINCT miner_address || ':' || worker_id)
+		FROM shares
+		WHERE timestamp >= ?`, since).Scan(&count)
+
+	if err != nil {
+		return 0, fmt.Errorf("failed to get active worker count: %w", err)
+	}
+	return count, nil
+}
+
+// TopMinerAPI is the structure expected by the API with all miner stats
+type TopMinerAPI struct {
+	MinerAddr         string
+	ShareCount        uint64   // Number of shares submitted
+	SharesInWindow    uint64   // Number of shares in current PPLNS window
+	WorkerCount       int      // Number of workers
+	Percentage        float64  // Percentage of pool (based on PPLNS weight)
+	LastShareTime     int64    // When they last submitted a share
+}
+
+// GetTopMinersForAPI returns top miners in the format expected by the API
+func (l *LedgerDB) GetTopMinersForAPI(limit int) ([]TopMinerAPI, error) {
+	// Get PPLNS window duration
+	pplnsWindow := int64(21600) // 6 hours default
+	windowStart := time.Now().Unix() - pplnsWindow
+	
+	// Get miners with shares in PPLNS window
+	rows, err := l.db.Query(`
+		SELECT 
+			miner_address,
+			COUNT(DISTINCT worker_id) as worker_count,
+			COUNT(*) as shares_in_window,
+			SUM(difficulty) as pplns_weight,
+			MAX(timestamp) as last_share_time
+		FROM shares
+		WHERE timestamp >= ?
+		GROUP BY miner_address
+		ORDER BY pplns_weight DESC
+		LIMIT ?`, windowStart, limit)
+	
+	if err != nil {
+		return nil, fmt.Errorf("failed to get top miners: %w", err)
+	}
+	defer rows.Close()
+	
+	var miners []TopMinerAPI
+	var totalWeight uint64
+	
+	// First pass to collect data and total weight
+	type tempMiner struct {
+		addr           string
+		workers        int
+		sharesInWindow uint64
+		pplnsWeight    uint64
+		lastShareTime  int64
+	}
+	var tempMiners []tempMiner
+	
+	for rows.Next() {
+		var tm tempMiner
+		err := rows.Scan(&tm.addr, &tm.workers, &tm.sharesInWindow, &tm.pplnsWeight, &tm.lastShareTime)
+		if err != nil {
+			return nil, err
+		}
+		tempMiners = append(tempMiners, tm)
+		totalWeight += tm.pplnsWeight
+	}
+	
+	// Now get total shares (all time) for each miner
+	for _, tm := range tempMiners {
+		// Get total share count for this miner
+		var totalShares uint64
+		err := l.db.QueryRow(`
+			SELECT COUNT(*) FROM shares WHERE miner_address = ?`, 
+			tm.addr).Scan(&totalShares)
+		if err != nil {
+			totalShares = tm.sharesInWindow // Fallback
+		}
+		
+		m := TopMinerAPI{
+			MinerAddr:      tm.addr,
+			ShareCount:     totalShares,
+			SharesInWindow: tm.sharesInWindow,
+			WorkerCount:    tm.workers,
+			Percentage:     0,
+			LastShareTime:  tm.lastShareTime,
+		}
+		
+		// Calculate percentage based on PPLNS weight
+		if totalWeight > 0 {
+			m.Percentage = float64(tm.pplnsWeight) / float64(totalWeight) * 100
+		}
+		
+		miners = append(miners, m)
+	}
+	
+	return miners, nil
+}
+
+// WorkerStats represents statistics for a single worker
+type WorkerStats struct {
+	WorkerID          string
+	ShareCount        uint64  // Total shares submitted by this worker
+	SharesInWindow    uint64  // Shares in current PPLNS window
+	LastShareTime     int64   // When this worker last submitted a share
+	Percentage        float64 // Percentage of miner's total shares
+	Hashrate          float64 // Worker's hashrate
+}
+
+// GetMinerWorkerStats gets per-worker statistics for a specific miner
+func (l *LedgerDB) GetMinerWorkerStats(minerAddr string, windowStart int64) ([]WorkerStats, error) {
+	// Get stats for each worker with hashrate calculation
+	rows, err := l.db.Query(`
+		SELECT 
+			worker_id,
+			COUNT(*) as total_shares,
+			SUM(CASE WHEN timestamp >= ? THEN 1 ELSE 0 END) as shares_in_window,
+			SUM(CASE WHEN timestamp >= ? THEN difficulty ELSE 0 END) as window_difficulty,
+			MAX(timestamp) as last_share_time
+		FROM shares
+		WHERE miner_address = ?
+		GROUP BY worker_id
+		ORDER BY total_shares DESC`, windowStart, windowStart, minerAddr)
+	
+	if err != nil {
+		return nil, fmt.Errorf("failed to get worker stats: %w", err)
+	}
+	defer rows.Close()
+	
+	var workers []WorkerStats
+	var totalShares uint64
+	
+	// First pass to get total
+	type tempWorker struct {
+		id             string
+		totalShares    uint64
+		sharesInWindow uint64
+		windowDiff     uint64
+		lastShareTime  int64
+	}
+	var tempWorkers []tempWorker
+	
+	for rows.Next() {
+		var tw tempWorker
+		err := rows.Scan(&tw.id, &tw.totalShares, &tw.sharesInWindow, &tw.windowDiff, &tw.lastShareTime)
+		if err != nil {
+			return nil, err
+		}
+		tempWorkers = append(tempWorkers, tw)
+		totalShares += tw.totalShares
+	}
+	
+	// Calculate percentages and hashrates
+	windowDuration := time.Now().Unix() - windowStart
+	if windowDuration <= 0 {
+		windowDuration = 1
+	}
+	
+	for _, tw := range tempWorkers {
+		w := WorkerStats{
+			WorkerID:       tw.id,
+			ShareCount:     tw.totalShares,
+			SharesInWindow: tw.sharesInWindow,
+			LastShareTime:  tw.lastShareTime,
+			Percentage:     0,
+			Hashrate:       float64(tw.windowDiff) / float64(windowDuration), // H/s
+		}
+		if totalShares > 0 {
+			w.Percentage = float64(tw.totalShares) / float64(totalShares) * 100
+		}
+		workers = append(workers, w)
+	}
+	
+	return workers, nil
+}
+
+// Alias methods for API compatibility
+var GetBalance = (*LedgerDB).GetBalance
+var GetRecentBlocks = (*LedgerDB).GetRecentBlocks
+var GetTopMiners = (*LedgerDB).GetTopMiners
+
+// Export the conn field for direct access if needed
+func (l *LedgerDB) Conn() *sql.DB {
+	return l.db
 }
 

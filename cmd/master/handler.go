@@ -104,10 +104,10 @@ func OnMessage(msg []byte, connId uint64) {
 	packet := d.ReadUint8()
 
 	switch packet {
-	case 0: // Share Found packet - MODIFIED to handle worker info
+	case 0: // Share Found packet
 		numShares := uint32(d.ReadUvarint())
 		wallet := d.ReadString()
-		workerID := d.ReadString() // NEW: Read worker ID
+		workerID := d.ReadString() // Read worker ID
 		diff := d.ReadUvarint()
 
 		if d.Error != nil {
@@ -120,9 +120,9 @@ func OnMessage(msg []byte, connId uint64) {
 		UpdateWorkerActivity(wallet, workerID)
 		Stats.Unlock()
 
-		// Call the original master function for database operations
-		OnShareFound(wallet, diff, numShares)
-		
+		// Pass worker ID to the function
+		OnShareFound(wallet, diff, numShares, workerID)
+	
 	case 1: // Block Found packet
 		if config.Cfg.UseP2Pool {
 			logger.Error("received Block Found packet; is using P2Pool")
