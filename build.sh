@@ -1,3 +1,6 @@
+
+set -e
+
 rm -r build
 mkdir build
 
@@ -24,5 +27,5 @@ go build -o ./build/db-clear-pending ./tools/db-clear-pending.go
 cp config.json ./build/
 
 cd build
-tar cvfz ../pool.tgz .
+tar cvfz ~/pool.tgz .
 

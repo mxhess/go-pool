@@ -31,10 +31,32 @@ import (
 	"github.com/mxhess/go-salvium/rpc/wallet"
 )
 
-// Stats is defined in stats.go, removing duplicate declaration
+var minHeight uint64
+var minHeightMut sync.RWMutex
+var minHeightInitialized bool
+var lastProcessedHeight uint64 // Track the highest processed transfer
+
+// Add this init function to be called from main() or Updater():
+func initTransferTracking() {
+	// Load last processed height from database
+	lastHeight, err := Ledger.GetLastProcessedHeight()
+	if err != nil {
+		logger.Error("Failed to get last processed height:", err)
+		// Fallback to zero
+		minHeight = 0
+	} else {
+		minHeight = lastHeight + 1
+		logger.Info("📊 Starting transfer processing from height:", minHeight)
+	}
+	minHeightInitialized = true
+}
 
 // ✅ PURE SQLITE UPDATER - NO BOLT GARBAGE!
 func Updater() {
+
+	// Initialize transfer tracking
+	initTransferTracking()
+
 	// Start withdrawal processor
 	go func() {
 		for {
@@ -111,10 +133,6 @@ func UpdateReward() {
 	}
 }
 
-var minHeight uint64
-var minHeightMut sync.RWMutex
-var lastProcessedHeight uint64 // Track the highest processed transfer
-
 // ✅ PURE SQLITE TRANSFER PROCESSOR - INFINITE LOOPS DESTROYED!
 func UpdatePendingBals() {
 	logger.Debug("🔄 Updating user balances via pure SQLite ledger")
@@ -129,13 +147,9 @@ func UpdatePendingBals() {
 		return
 	}
 
-	minHeightMut.Lock()
-	// Update minHeight if we've processed newer transfers
-	if lastProcessedHeight > minHeight {
-		minHeight = lastProcessedHeight + 1
-	}
+	minHeightMut.RLock()
 	currentMinHeight := minHeight
-	minHeightMut.Unlock()
+	minHeightMut.RUnlock()
 
 	transfers, err := WalletRpc.GetTransfers(ctx, wallet.GetTransfersParams{
 		In:             true,
@@ -155,13 +169,22 @@ func UpdatePendingBals() {
 		return transfers.In[i].Height < transfers.In[j].Height
 	})
 
-	if len(transfers.In) > 0 {
-		logger.Dev("🔍 Processing", len(transfers.In), "transfers via SQLite ledger")
+	// Count only unprocessed transfers for logging
+	unprocessedCount := 0
+	for _, vt := range transfers.In {
+		processed, err := Ledger.IsTransferProcessed(vt.Txid)
+		if err != nil || !processed {
+			unprocessedCount++
+		}
+	}
+	
+	if unprocessedCount > 0 {
+		logger.Dev("🔍 Processing", unprocessedCount, "new transfers via SQLite ledger")
 	}
 
-	// ✅ PURE SQLITE TRANSFER PROCESSING - ANTI-BUG PROTECTION!
+	// Process transfers
 	for _, vt := range transfers.In {
-		// 🚫 THE BUG KILLER: Check if already processed
+		// Check if already processed
 		processed, err := Ledger.IsTransferProcessed(vt.Txid)
 		if err != nil {
 			logger.Error("❌ Error checking transfer:", err)
@@ -169,7 +192,12 @@ func UpdatePendingBals() {
 		}
 
 		if processed {
-			// Don't log at DEV level for known processed transfers
+			// Update minHeight if this processed transfer is newer
+			minHeightMut.Lock()
+			if vt.Height >= minHeight {
+				minHeight = vt.Height + 1
+			}
+			minHeightMut.Unlock()
 			continue
 		}
 
@@ -181,21 +209,37 @@ func UpdatePendingBals() {
 			continue
 		}
 
-		// 🛡️ Mark as processed - PREVENTS FUTURE INFINITE LOOPS!
+		// Mark as processed
 		err = Ledger.MarkTransferProcessed(vt.Txid, vt.Height, vt.Amount)
 		if err != nil {
 			logger.Error("❌ Error marking transfer processed:", err)
 		} else {
 			logger.Info("✅ Transfer", vt.Txid, "processed and marked - WILL NEVER REPROCESS!")
 
-			// Update lastProcessedHeight
+			// Update minHeight for next run
 			minHeightMut.Lock()
-			if vt.Height > lastProcessedHeight {
-				lastProcessedHeight = vt.Height
+			if vt.Height >= minHeight {
+				minHeight = vt.Height + 1
 			}
 			minHeightMut.Unlock()
 		}
 	}
+
+	if len(transfers.In) > 0 {
+		// Get the highest height we've seen
+		highestHeight := transfers.In[len(transfers.In)-1].Height
+       
+		// Save it to the database
+		if err := Ledger.UpdateLastProcessedHeight(highestHeight); err != nil {
+			logger.Error("Failed to update last processed height:", err)
+		}
+       
+		// Update in-memory tracking
+		minHeightMut.Lock()
+		minHeight = highestHeight + 1
+		minHeightMut.Unlock()
+	}
+
 }
 
 // ✅ PURE SQLITE TRANSFER PROCESSOR

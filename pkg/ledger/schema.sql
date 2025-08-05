@@ -74,3 +74,13 @@ CREATE TABLE IF NOT EXISTS blockchain_info (
 -- Insert default row
 INSERT OR IGNORE INTO blockchain_info (id) VALUES (1);
 
+CREATE TABLE IF NOT EXISTS pool_config (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+-- Insert default value
+INSERT OR IGNORE INTO pool_config (key, value, updated_at) 
+VALUES ('last_processed_height', '0', 0);
+

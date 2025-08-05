@@ -5,6 +5,7 @@ package ledger
 import (
         "database/sql"
 	"go-pool/logger"
+	"strconv"
         "embed"
         "fmt"
         "log"
@@ -962,6 +963,39 @@ func (l *LedgerDB) UpdateBlockchainInfo(height, blockReward, difficulty uint64) 
 		SET height = ?, block_reward = ?, difficulty = ?, updated_at = ?
 		WHERE id = 1
 	`, height, blockReward, difficulty, time.Now().Unix())
+	
+	return err
+}
+
+// GetLastProcessedHeight retrieves the last processed transfer height
+func (l *LedgerDB) GetLastProcessedHeight() (uint64, error) {
+	var heightStr string
+	err := l.db.QueryRow(`
+		SELECT value FROM pool_config WHERE key = 'last_processed_height'
+	`).Scan(&heightStr)
+	
+	if err != nil {
+		if err == sql.ErrNoRows {
+			// No config yet, return 0 for fresh start
+			return 0, nil
+		}
+		return 0, err
+	}
+	
+	height, err := strconv.ParseUint(heightStr, 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	
+	return height, nil
+}
+
+// UpdateLastProcessedHeight updates the last processed height
+func (l *LedgerDB) UpdateLastProcessedHeight(height uint64) error {
+	_, err := l.db.Exec(`
+		INSERT OR REPLACE INTO pool_config (key, value, updated_at)
+		VALUES ('last_processed_height', ?, ?)
+	`, strconv.FormatUint(height, 10), time.Now().Unix())
 	
 	return err
 }
