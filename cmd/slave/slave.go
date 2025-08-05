@@ -278,7 +278,10 @@ func main() {
             logger.Fatal("Failed to initialize daemon pool:", err)
         }
         defer daemonPool.Close()
-    
+
+	// Start penalty box cleanup
+	penaltyBox.StartCleanup()
+
         // Initialize verification queue
         verifyQueue, err = NewVerifyQueue(
             config.Cfg.SlaveConfig.VerifyQueueDB,      // default: "slave_verify.db"

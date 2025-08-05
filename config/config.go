@@ -126,6 +126,14 @@ type SlaveConfig struct {
         VerifyQueueDB     string `json:"verify_queue_db"`      // Path to verification queue database
         VerifyAlertDelay  int    `json:"verify_alert_delay"`   // Seconds before alerting on slow verification
 
+	// Penalty Box Configuration
+	PenaltyEnabled        bool    `json:"penalty_enabled"`         // Enable/disable penalty box
+	MaxSharesPerSecond    float64 `json:"max_shares_per_second"`   // Rate limit threshold
+	BadShareRatio         float64 `json:"bad_share_ratio"`         // Max bad share ratio (e.g., 0.167 for 1/6)
+	BanDurationMinutes    int     `json:"ban_duration_minutes"`    // How long to ban offenders
+	ShareWindowMinutes    int     `json:"share_window_minutes"`    // Time window for ratio calculation
+	ShareTimingWindowSize int     `json:"share_timing_window"`     // Number of shares to track for rate limiting
+
 }
 
 type StratumAddr struct {

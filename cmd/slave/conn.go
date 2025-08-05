@@ -29,6 +29,7 @@ import (
 	"go-pool/stratum"
 	"go-pool/template"
 	"go-pool/util"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -92,6 +93,23 @@ func extractWorkerID(login, pass, agent string) string {
 }
 
 func HandleConnection(conn *stratum.Connection) {
+	// Get client IP
+	clientIP := conn.Conn.RemoteAddr().String()
+	if host, _, err := net.SplitHostPort(clientIP); err == nil {
+		clientIP = host
+	}
+
+	// Check penalty box
+	if penaltyBox.CheckBanned(clientIP) {
+		logger.Warn("Rejected connection from banned IP:", clientIP)
+		conn.SendBytes([]byte(`{"error":{"code":-1,"message":"Too many invalid shares. Try again later."},"jsonrpc":"2.0"}`))
+		srv.Kick(conn.Id)
+		return
+	}
+
+	// Add cleanup on exit
+	defer penaltyBox.CleanupConnection(conn.Id, clientIP)
+
 	// read login request
 	req := stratum.RequestLogin{}
 	conn.Conn.SetReadDeadline(time.Now().Add(30 * time.Second))
@@ -632,6 +650,14 @@ func HandleConnection(conn *stratum.Connection) {
 		    }
 		    if calcPow != req.Params.Result {
 		        logger.Warn("INVALID SHARE RECEIVED: wrong hash: received:", req.Params.Result, ", should be", calcPow)
+			// Check penalty box
+			if !penaltyBox.RecordShare(conn.Id, clientIP, false) {
+				logger.Warn("Connection", conn.Id, "banned for excessive bad shares")
+				conn.SendBytes([]byte(`{"error":{"code":-1,"message":"Too many invalid shares. Banned."},"id":` + strconv.FormatUint(req.ID, 10) + `,"jsonrpc":"2.0"}`))
+				srv.Kick(conn.Id)
+				return
+			}
+
 		        conn.Score = -100
 		        conn.SendBytes([]byte("{\"error\":{\"code\":-1,\"message\":\"wrong hash\"},\"id\":" + strconv.FormatUint(req.ID, 10) + ",\"jsonrpc\":\"2.0\"}"))
 		        conn.Unlock()
@@ -666,6 +692,12 @@ func HandleConnection(conn *stratum.Connection) {
 		}
 
 		// Share is valid!
+
+		if !penaltyBox.RecordShare(conn.Id, clientIP, true) {
+			// This shouldn't happen for valid shares, but check anyway
+			srv.Kick(conn.Id)
+			return
+		}
 
 		conn.Score += 1
 
