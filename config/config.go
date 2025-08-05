@@ -112,8 +112,20 @@ type SlaveConfig struct {
 	PoolPort    uint16 `json:"pool_port"`
 	PoolPortTls uint16 `json:"pool_port_tls"`
 
+	MonitorPort int `json:"monitor_port"`
+
 	TemplateTimeout int     `json:"template_timeout"`
 	SlaveFee        float64 `json:"slave_fee"`
+
+        // Daemon pool settings
+        DaemonPoolSize    int `json:"daemon_pool_size"`        // Number of daemon connections
+        DaemonPoolMaxAge  int `json:"daemon_pool_max_age"`     // Minutes before recycling connections
+    
+        // Verify queue settings  
+        VerifyWorkers     int    `json:"verify_workers"`       // Number of verification workers
+        VerifyQueueDB     string `json:"verify_queue_db"`      // Path to verification queue database
+        VerifyAlertDelay  int    `json:"verify_alert_delay"`   // Seconds before alerting on slow verification
+
 }
 
 type StratumAddr struct {

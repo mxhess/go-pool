@@ -188,15 +188,20 @@ func HandleConnection(conn *stratum.Connection) {
 
 	// Apply difficulty constraints
 	if requestedDiff > 0 {
-		CurInfo.RLock()
+		// Only enforce minimum difficulty
 		if requestedDiff < config.Cfg.SlaveConfig.MinDiff {
 			requestedDiff = config.Cfg.SlaveConfig.MinDiff
-		} else if requestedDiff > CurInfo.Difficulty/2 {
-			requestedDiff = CurInfo.Difficulty / 2
 		}
-		CurInfo.RUnlock()
+		// Remove the network difficulty check - if miner wants high diff, let them have it!
 		conn.CurrentJob.Diff = requestedDiff
+		logger.Info("Using requested difficulty:", requestedDiff)
 	}
+	// Set default difficulty if none specified
+	if conn.CurrentJob.Diff == 0 {
+		conn.CurrentJob.Diff = config.Cfg.SlaveConfig.MinDiff * 2
+	}
+	conn.NextDiff = float64(conn.CurrentJob.Diff)
+	conn.LastShare = time.Now().UnixMilli()
 
 	// Set default difficulty if none specified
 	if conn.CurrentJob.Diff == 0 {
@@ -591,41 +596,57 @@ func HandleConnection(conn *stratum.Connection) {
 		}
 
 		CurInfo.Lock()
-		if shareDiff >= CurInfo.Difficulty || conn.Score < int32(config.Cfg.SlaveConfig.TrustScore) || util.RandomFloat() > 0.5 {
-			logger.Debug("Checking share PoW (score", conn.Score, ")")
-			calcPow, err := client.CalcPow(context.Background(), daemon.CalcPowParameters{
-				MajorVersion: CurInfo.MajorVersion,
-				Height:       CurInfo.Height,
-				BlockBlob:    resultHashingBlobString,
-				SeedHash:     CurInfo.SeedHash,
-			})
-			if err != nil {
-				logger.Warn("error getting pow:", err)
-				conn.Send(stratum.Reply{
-					ID:      req.ID,
-					Jsonrpc: "2.0",
-					Error: &stratum.ErrorJson{
-						Code:    -1,
-						Message: "internal server error",
-					},
-				})
-				conn.Unlock()
-				CurInfo.Unlock()
-				continue
-			}
-			if calcPow != req.Params.Result {
-				logger.Warn("INVALID SHARE RECEIVED: wrong hash: received:", req.Params.Result, ", should be", calcPow)
-				conn.Score = -100
-				// not using conn.Send for better performance
-				conn.SendBytes([]byte("{\"error\":{\"code\":-1,\"message\":\"wrong hash\"},\"id\":" + strconv.FormatUint(req.ID, 10) + ",\"jsonrpc\":\"2.0\"}"))
-
-				conn.Unlock()
-				CurInfo.Unlock()
-				continue
-			}
-		} else {
-			logger.Dev("Skipping share PoW")
+		// Submit to verification queue
+		shareToVerify := ShareToVerify{
+		    ConnectionID: conn.Id,
+		    CalcPowParams: daemon.CalcPowParameters{
+		        MajorVersion: CurInfo.MajorVersion,
+		        Height:       CurInfo.Height,
+		        BlockBlob:    resultHashingBlobString,
+		        SeedHash:     CurInfo.SeedHash,
+		    },
+		    ExpectedResult: req.Params.Result,
+		    ShareDiff:      shareDiff,
+		    MinerAddr:      connAddress,
+		    WorkerID:       workerID,
 		}
+
+		// Always verify potential blocks synchronously
+		if shareDiff >= CurInfo.Difficulty {
+		    // This might be a block! Verify immediately
+		    logger.Debug("Potential block - verifying synchronously")
+		    calcPow, err := client.CalcPow(context.Background(), shareToVerify.CalcPowParams)
+		    if err != nil {
+		        logger.Warn("error getting pow:", err)
+		        conn.Send(stratum.Reply{
+		            ID:      req.ID,
+		            Jsonrpc: "2.0",
+		            Error: &stratum.ErrorJson{
+		                Code:    -1,
+		                Message: "internal server error",
+		            },
+		        })
+		        conn.Unlock()
+		        CurInfo.Unlock()
+		        continue
+		    }
+		    if calcPow != req.Params.Result {
+		        logger.Warn("INVALID SHARE RECEIVED: wrong hash: received:", req.Params.Result, ", should be", calcPow)
+		        conn.Score = -100
+		        conn.SendBytes([]byte("{\"error\":{\"code\":-1,\"message\":\"wrong hash\"},\"id\":" + strconv.FormatUint(req.ID, 10) + ",\"jsonrpc\":\"2.0\"}"))
+		        conn.Unlock()
+		        CurInfo.Unlock()
+		        continue
+		    }
+		} else {
+		    // Regular share - queue for async verification
+		    err := verifyQueue.Submit(shareToVerify)
+		    if err != nil {
+		        logger.Error("Failed to queue share for verification:", err)
+		    }
+		}
+
+		// Continue with share acceptance...
 		CurInfo.Unlock()
 
 		if shareDiff < theJob.Diff {

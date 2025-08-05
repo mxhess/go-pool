@@ -7,7 +7,6 @@ import (
     "go-pool/config"
     "go-pool/logger"
     "go-pool/pkg/ledger"
-    "math"
     "time"
 )
 
@@ -34,10 +33,12 @@ func InitPPLNS() {
 
 // GetPPLNSWindow returns the current PPLNS window in terms of share difficulty
 func (p *PPLNSManager) GetPPLNSWindow() uint64 {
-    MasterInfo.RLock()
-    netDifficulty := MasterInfo.Difficulty
-    MasterInfo.RUnlock()
-    
+    _, _, netDifficulty, err := Ledger.GetBlockchainInfo()
+    if err != nil {
+        logger.Error("Failed to get blockchain info:", err)
+        netDifficulty = 1
+    }
+ 
     // Calculate bounds based on network difficulty
     minWindow := uint64(float64(netDifficulty) * config.Cfg.MasterConfig.PPLNSMinWindow)
     maxWindow := uint64(float64(netDifficulty) * config.Cfg.MasterConfig.PPLNSMaxWindow)
@@ -61,10 +62,13 @@ func (p *PPLNSManager) OnBlockFoundPPLNS(height uint64) {
         return
     }
     
-    MasterInfo.RLock()
-    expectedShares := MasterInfo.Difficulty
-    MasterInfo.RUnlock()
-    
+    // Get expected shares from SQLite (no locks needed!)
+    _, _, expectedShares, err := Ledger.GetBlockchainInfo()
+    if err != nil {
+	logger.Error("Failed to get blockchain info:", err)
+	expectedShares = 1 // Prevent division by zero
+    }
+ 
     if expectedShares == 0 {
         return
     }
@@ -159,5 +163,29 @@ func GetPplnsWindow() int {
     }
     
     return seconds
+}
+
+// GetMinerSharePercentage returns a miner's percentage of the current PPLNS window
+func (p *PPLNSManager) GetMinerSharePercentage(minerAddr string) (float64, error) {
+    shares, err := p.GetSharesForPPLNS()
+    if err != nil {
+        return 0, err
+    }
+    
+    var totalDiff uint64
+    var minerDiff uint64
+    
+    for _, share := range shares {
+        totalDiff += share.Difficulty
+        if share.MinerAddr == minerAddr {
+            minerDiff += share.Difficulty
+        }
+    }
+    
+    if totalDiff == 0 {
+        return 0, nil
+    }
+    
+    return float64(minerDiff) / float64(totalDiff), nil
 }
 

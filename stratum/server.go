@@ -90,10 +90,10 @@ func (c *Connection) SendBytes(data []byte) error {
 }
 
 func randomUint64() uint64 {
-	b := make([]byte, 8)
-	rand.Read(b)
-
-	return binary.BigEndian.Uint64(b)
+    b := make([]byte, 8)
+    rand.Read(b)
+    // Mask the high bit to ensure it fits in int64 when stored
+    return binary.BigEndian.Uint64(b) & 0x7FFFFFFFFFFFFFFF
 }
 
 func (s *Server) Start(port uint16, port_tls uint16) {

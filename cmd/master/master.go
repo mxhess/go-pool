@@ -22,9 +22,8 @@ import (
 	"go-pool/config"
 	"go-pool/pkg/ledger"
 	"go-pool/logger"
-	"math"
+	"fmt"
 	"net"
-	"sync"
 	"time"
 	
 	"github.com/mxhess/go-salvium/rpc"
@@ -32,14 +31,6 @@ import (
 	"github.com/mxhess/go-salvium/rpc/wallet"
 )
 
-type Info struct {
-	Height      uint64
-	BlockReward uint64
-	Difficulty  uint64
-	sync.RWMutex
-}
-
-var MasterInfo Info
 var statsCollector *StatsCollector
 
 
@@ -90,7 +81,7 @@ func main() {
 
 	go Updater()
 	go StartApiServer()
-	
+
 	// Start stratum server in main thread since it has the accept loop
 	startStratum()
 
@@ -187,6 +178,114 @@ func BlockFound(nonce uint64, addr string, hash string, height uint64, reward ui
     }()
 }
 
+// DistributeBlockRewardPPLNS distributes rewards using PPLNS
+func DistributeBlockRewardPPLNS(height uint64, reward uint64) error {
+    logger.Info("Distributing block reward using PPLNS - Height:", height, "Reward:", reward)
+    
+    // Get PPLNS shares
+    shares, err := pplnsManager.GetSharesForPPLNS()
+    if err != nil {
+        return fmt.Errorf("failed to get PPLNS shares: %w", err)
+    }
+    
+    if len(shares) == 0 {
+        logger.Warn("No shares found for PPLNS distribution")
+        return nil
+    }
+    
+    // Calculate total difficulty in window
+    var totalDiff uint64
+    minerDiffs := make(map[string]uint64)
+    
+    for _, share := range shares {
+        totalDiff += share.Difficulty
+        minerDiffs[share.MinerAddr] += share.Difficulty
+    }
+    
+    if totalDiff == 0 {
+        return fmt.Errorf("total difficulty is zero")
+    }
+    
+    // Calculate fee
+    feePercent := config.Cfg.MasterConfig.FeePercent / 100.0
+    feeAmount := uint64(float64(reward) * feePercent)
+    netReward := reward - feeAmount
+    
+    // Distribute to miners
+    for minerAddr, minerDiff := range minerDiffs {
+        percentage := float64(minerDiff) / float64(totalDiff)
+        minerReward := uint64(float64(netReward) * percentage)
+        
+        if minerReward == 0 {
+            continue
+        }
+        
+        // Create distribution record
+        dist := ledger.Distribution{
+            BlockHeight:   height,
+            MinerAddr:     minerAddr,
+            SharesContrib: minerDiff,
+            Percentage:    percentage * 100,
+            RewardGross:   minerReward,
+            RewardNet:     minerReward,
+            CalculatedAt:  time.Now().Unix(),
+        }
+        
+        if err := Ledger.CreateDistribution(dist); err != nil {
+            logger.Error("Failed to create distribution for", minerAddr, ":", err)
+            continue
+        }
+        
+        // Update miner balance
+        balance, err := Ledger.GetBalance(minerAddr)
+        if err != nil {
+            logger.Error("Failed to get balance for", minerAddr, ":", err)
+            continue
+        }
+        
+        // Add to pending balance
+        newPending := balance.BalancePending + minerReward
+        
+        // Update balance in database
+        _, err = Ledger.Conn().Exec(`
+            INSERT OR REPLACE INTO balances 
+            (miner_address, balance_pending, balance_confirmed, total_paid, last_updated)
+            VALUES (?, ?, ?, ?, ?)`,
+            minerAddr, newPending, balance.BalanceConfirmed, 
+            balance.TotalPaid, time.Now().Unix())
+        
+        if err != nil {
+            logger.Error("Failed to update balance for", minerAddr, ":", err)
+        }
+        
+        logger.Info("Distributed", minerReward, "to", minerAddr, 
+            "(", percentage*100, "% of shares)")
+    }
+    
+    // Record fee for pool
+    if feeAmount > 0 {
+        _, err = Ledger.Conn().Exec(`
+            INSERT INTO pool_fees (block_height, fee_amount, collected_at)
+            VALUES (?, ?, ?)`,
+            height, feeAmount, time.Now().Unix())
+        
+        if err != nil {
+            logger.Error("Failed to record pool fee:", err)
+        }
+    }
+    
+    // Mark block as processed
+    if err := Ledger.MarkBlockProcessed(height); err != nil {
+        logger.Error("Failed to mark block as processed:", err)
+    }
+    
+    // Adjust PPLNS window based on luck
+    pplnsManager.OnBlockFoundPPLNS(height)
+    
+    logger.Info("Block reward distribution completed")
+    return nil
+}
+
 // Update DistributeBlockReward to use the new PPLNS:
 func DistributeBlockReward(height uint64, reward uint64) {
     // Just call the PPLNS version
@@ -209,10 +308,12 @@ func GetEstPendingBalance(addr string) float64 {
     }
     
     // Get current block reward
-    MasterInfo.RLock()
-    blockReward := MasterInfo.BlockReward
-    MasterInfo.RUnlock()
-    
+    _, blockReward, _, err := Ledger.GetBlockchainInfo()
+    if err != nil {
+        logger.Error("Failed to get blockchain info:", err)
+        blockReward = 0
+    }
+ 
     // Calculate after fee
     feePercent := config.Cfg.MasterConfig.FeePercent / 100.0
     netReward := float64(blockReward) * (1 - feePercent)
@@ -220,7 +321,5 @@ func GetEstPendingBalance(addr string) float64 {
     // Miner's estimated pending
     return percentage * netReward / Coin
 }
-
-// GetPplnsWindow is defined in pplns_diff.go
 
 

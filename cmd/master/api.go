@@ -244,11 +244,13 @@ func handleStatsOld(w http.ResponseWriter, r *http.Request) {
         // Pool stats - ALL FROM SQLITE, NO STATS STRUCT!
         
         // Get blockchain info
-        MasterInfo.RLock()
-        height := MasterInfo.Height
-        blockReward := MasterInfo.BlockReward
-        difficulty := MasterInfo.Difficulty
-        MasterInfo.RUnlock()
+        height, blockReward, difficulty, err := Ledger.GetBlockchainInfo()
+        if err != nil {
+            logger.Warn("Failed to get blockchain info:", err)
+            height = 0
+            blockReward = 0
+            difficulty = 1
+        }
 
         // Get everything from SQLite
         now := time.Now().Unix()
@@ -509,6 +511,10 @@ func GetCurrentTime() uint64 {
 func startAPI() {
 	addr := ":" + strconv.Itoa(int(config.Cfg.MasterConfig.ApiPort))
 
+	http.HandleFunc("/ping", func(w http.ResponseWriter, r *http.Request) {
+	    w.Write([]byte("pong"))
+	})
+
 	// Use old API format for compatibility
 	http.HandleFunc("/stats", handleStatsOld)
 	http.HandleFunc("/stats/", handleStatsOld)
@@ -583,5 +589,16 @@ func handleWorkers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(response)
+}
+
+func handlePoolStats(w http.ResponseWriter, r *http.Request) {
+    w.Header().Set("Content-Type", "application/json")
+    w.Header().Set("Access-Control-Allow-Origin", "*")
+    w.Header().Set("Cache-Control", "max-age=5")
+    
+    logger.Info("API: Pool stats called")
+    
+    // Just call the existing working function
+    handleStatsOld(w, r)
 }
 

@@ -23,3 +23,6 @@ go build -o ./build/db-clear-pending ./tools/db-clear-pending.go
 #cp -r ./docs ./build/
 cp config.json ./build/
 
+cd build
+tar cvfz ../pool.tgz .
+

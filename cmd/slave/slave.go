@@ -19,10 +19,13 @@ package main
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"go-pool/config"
 	"go-pool/logger"
 	"go-pool/slave"
 	"go-pool/stratum"
+	"net/http"
+	"fmt"
 	"os"
 	"os/signal"
 	"sync"
@@ -46,6 +49,8 @@ type Infos struct {
 }
 
 var CurInfo Infos
+var daemonPool *DaemonPool  // ADD THIS LINE
+var verifyQueue *VerifyQueue // ADD THIS LINE
 
 // blockhashing_blob
 // 39 bytes...
@@ -262,6 +267,39 @@ func main() {
 	client = daemon.NewClient(rpcClient)
 
 	logger.Info("Using daemon RPC " + config.Cfg.DaemonRpc)
+
+        // Initialize daemon pool for load distribution
+        daemonPool, err = NewDaemonPool(
+            config.Cfg.DaemonRpc, 
+            config.Cfg.SlaveConfig.DaemonPoolSize,     // default: 5
+            time.Duration(config.Cfg.SlaveConfig.DaemonPoolMaxAge) * time.Minute, // default: 5
+        )
+        if err != nil {
+            logger.Fatal("Failed to initialize daemon pool:", err)
+        }
+        defer daemonPool.Close()
+    
+        // Initialize verification queue
+        verifyQueue, err = NewVerifyQueue(
+            config.Cfg.SlaveConfig.VerifyQueueDB,      // default: "slave_verify.db"
+            config.Cfg.SlaveConfig.VerifyWorkers,      // default: 4
+            daemonPool,
+        )
+        if err != nil {
+            logger.Fatal("Failed to initialize verify queue:", err)
+        }
+        defer verifyQueue.Stop()
+    
+        // Add HTTP endpoint for monitoring
+	go func() {
+	    addr := fmt.Sprintf(":%d", config.Cfg.SlaveConfig.MonitorPort)
+	    http.HandleFunc("/verify/stats", func(w http.ResponseWriter, r *http.Request) {
+	        stats := verifyQueue.GetStats()
+	        json.NewEncoder(w).Encode(stats)
+	    })
+	    logger.Info("Verify queue stats available at", addr, "/verify/stats")
+	    http.ListenAndServe(addr, nil)
+	}()
 
 	go Refresher()
 

@@ -51,3 +51,26 @@ CREATE TABLE IF NOT EXISTS payments (
     sent_at INTEGER,
     confirmed_at INTEGER
 );
+
+CREATE TABLE IF NOT EXISTS pool_stats_history (
+    timestamp INTEGER PRIMARY KEY,
+    pool_hashrate INTEGER NOT NULL,      -- Changed from BIGINT
+    network_hashrate INTEGER NOT NULL,   -- Changed from BIGINT
+    network_difficulty INTEGER NOT NULL, -- Changed from BIGINT
+    connected_miners INTEGER NOT NULL,
+    connected_workers INTEGER NOT NULL,
+    round_shares INTEGER DEFAULT 0,
+    blocks_found INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS blockchain_info (
+    id INTEGER PRIMARY KEY DEFAULT 1,
+    height INTEGER NOT NULL DEFAULT 0,
+    block_reward INTEGER NOT NULL DEFAULT 0,
+    difficulty INTEGER NOT NULL DEFAULT 1,
+    updated_at INTEGER NOT NULL DEFAULT 0
+);
+
+-- Insert default row
+INSERT OR IGNORE INTO blockchain_info (id) VALUES (1);
+

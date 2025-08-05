@@ -27,7 +27,7 @@ import (
 	"sort"
 	"sync"
 	"time"
-	
+
 	"github.com/mxhess/go-salvium/rpc/wallet"
 )
 
@@ -55,17 +55,24 @@ func Updater() {
 			continue
 		}
 
-		MasterInfo.Lock()
-		if info.Height != MasterInfo.Height {
-			logger.Info("📊 New height", MasterInfo.Height, "->", info.Height)
-			MasterInfo.Height = info.Height
-			MasterInfo.Lock()
-			MasterInfo.Difficulty = info.Difficulty
-			MasterInfo.Unlock()
-
+		// ✅ PURE SQLITE: No locks needed!
+		currentHeight, _, _, err := Ledger.GetBlockchainInfo()
+		if err != nil {
+			logger.Warn("Failed to get blockchain info:", err)
+			currentHeight = 0
+		}
+		
+		heightChanged := info.Height != currentHeight
+		if heightChanged {
+			logger.Info("📊 New height", currentHeight, "->", info.Height)
+			// Update blockchain info in SQLite
+			if err := Ledger.UpdateBlockchainInfo(info.Height, 0, info.Difficulty); err != nil {
+				logger.Error("Failed to update blockchain info:", err)
+			}
 			config.BlockTime = info.Target
-			MasterInfo.Unlock()
+		}
 
+		if heightChanged {
 			// Process transfers with PURE SQLite
 			go func() {
 				updated := CheckWithdraw()
@@ -76,8 +83,6 @@ func Updater() {
 				}
 			}()
 			go UpdatePendingBals()
-		} else {
-			MasterInfo.Unlock()
 		}
 
 		go UpdateReward()
@@ -92,10 +97,18 @@ func UpdateReward() {
 		logger.Warn(err)
 		return
 	}
-	MasterInfo.Lock()
-	defer MasterInfo.Unlock()
-	MasterInfo.BlockReward = info.BlockHeader.Reward
-
+	
+	// Get current blockchain info
+	height, _, difficulty, err := Ledger.GetBlockchainInfo()
+	if err != nil {
+		logger.Error("Failed to get blockchain info:", err)
+		return
+	}
+	
+	// Update with new block reward
+	if err := Ledger.UpdateBlockchainInfo(height, info.BlockHeader.Reward, difficulty); err != nil {
+		logger.Error("Failed to update block reward:", err)
+	}
 }
 
 var minHeight uint64
@@ -121,15 +134,16 @@ func UpdatePendingBals() {
 	if lastProcessedHeight > minHeight {
 		minHeight = lastProcessedHeight + 1
 	}
-	
+	currentMinHeight := minHeight
+	minHeightMut.Unlock()
+
 	transfers, err := WalletRpc.GetTransfers(ctx, wallet.GetTransfersParams{
 		In:             true,
 		AccountIndex:   indices.Index.Major,
 		SubaddrIndices: []uint{indices.Index.Minor},
 		FilterByHeight: true,
-		MinHeight:      minHeight,
+		MinHeight:      currentMinHeight,
 	})
-	minHeightMut.Unlock()
 
 	if err != nil {
 		logger.Warn(err)
@@ -173,7 +187,7 @@ func UpdatePendingBals() {
 			logger.Error("❌ Error marking transfer processed:", err)
 		} else {
 			logger.Info("✅ Transfer", vt.Txid, "processed and marked - WILL NEVER REPROCESS!")
-			
+
 			// Update lastProcessedHeight
 			minHeightMut.Lock()
 			if vt.Height > lastProcessedHeight {
